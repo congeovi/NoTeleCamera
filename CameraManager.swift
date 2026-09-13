@@ -291,12 +291,19 @@ final class CameraManager: NSObject, ObservableObject {
                     guard let self else { return }
                     if self.isRecording { self.stopRecording() }
                     self.abortAllCaptures()
-                    let reason = raw.flatMap { AVCaptureSession.InterruptionReason(rawValue: $0) }
-                    self.statusMessage = switch reason {
-                    case .videoDeviceInUseByAnotherClient: "Camera đang được app khác dùng."
-                    case .audioDeviceInUseByAnotherClient: "Mic đang được app khác dùng."
-                    case .videoDeviceNotAvailableWithMultipleForegroundApps: "Camera tạm dừng khi chia đôi màn hình."
-                    default: "Camera tạm bị gián đoạn."
+                    if let reason = raw.flatMap({ AVCaptureSession.InterruptionReason(rawValue: $0) }) {
+                        switch reason {
+                        case .videoDeviceInUseByAnotherClient:
+                            self.statusMessage = "Camera đang được app khác dùng."
+                        case .audioDeviceInUseByAnotherClient:
+                            self.statusMessage = "Mic đang được app khác dùng."
+                        case .videoDeviceNotAvailableWithMultipleForegroundApps:
+                            self.statusMessage = "Camera tạm dừng khi chia đôi màn hình."
+                        default:
+                            self.statusMessage = "Camera tạm bị gián đoạn."
+                        }
+                    } else {
+                        self.statusMessage = "Camera tạm bị gián đoạn."
                     }
                 }
             }
@@ -441,10 +448,14 @@ final class CameraManager: NSObject, ObservableObject {
             self.session.beginConfiguration()
             if self.session.canAddInput(input) {
                 self.session.addInput(input)
-                // AVFoundation mặc định thu mono; phải xin stereo rõ ràng.
-                if input.isMultichannelAudioModeSupported(.stereo) {
-                    input.multichannelAudioMode = .stereo
+                // AVFoundation mặc định thu mono; phải xin stereo rõ ràng (iOS 18+).
+                #if compiler(>=6.0)
+                if #available(iOS 18.0, *) {
+                    if input.isMultichannelAudioModeSupported(.stereo) {
+                        input.multichannelAudioMode = .stereo
+                    }
                 }
+                #endif
             }
             self.session.commitConfiguration()
         }
