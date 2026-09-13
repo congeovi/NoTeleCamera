@@ -1,0 +1,49 @@
+name: Build and Package iOS App
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode_16.app || true
+
+      - name: Build Archive (Unsigned)
+        run: |
+          xcodebuild archive \
+            -project NoTeleCamera.xcodeproj \
+            -scheme NoTeleCamera \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -archivePath build/NoTeleCamera.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -r build/NoTeleCamera.xcarchive/Products/Applications/NoTeleCamera.app Payload/
+          zip -r NoTeleCamera.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoTeleCamera-IPA
+          path: NoTeleCamera.ipa
+

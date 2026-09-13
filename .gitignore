@@ -1,0 +1,16 @@
+# macOS & iOS Build Artifacts
+.DS_Store
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+Payload/
+*.ipa
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Xcode Project (if using XcodeGen to generate)
+# *.xcodeproj
+
