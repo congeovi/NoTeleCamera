@@ -1,6 +1,7 @@
 name: NoTeleCamera
 options:
   bundleIdPrefix: com.notelecamera
+  projectFormat: xcode15_0
   deploymentTarget:
     iOS: "17.0"
 targets:
