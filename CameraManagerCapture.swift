@@ -111,9 +111,15 @@ extension CameraManager {
             }
  
             photoSettings.flashMode = self.photoOutput.supportedFlashModes.contains(flash) ? flash : .off
-            // Burst ưu tiên tốc độ; chụp đơn ưu tiên chất lượng
-            // (đây cũng là đường để iOS tự áp Night mode / Deep Fusion / Smart HDR).
-            photoSettings.photoQualityPrioritization = isBurst ? .speed : .quality
+            // Burst ưu tiên tốc độ; chụp đơn dùng .balanced — vẫn có Deep Fusion
+            // và Smart HDR, nhưng KHÔNG mở cửa cho Night mode phơi sáng dài.
+            // Với .quality máy gom khung trong cả giây sau khi bấm, hễ tay nhúc
+            // nhích là ảnh nhoè; phải giữ yên ~2s mới ra ảnh nét.
+            // Trần thật nằm ở photoOutput.maxPhotoQualityPrioritization (.balanced),
+            // đặt cao hơn trần ở đây là AVFoundation ném exception.
+            let ceiling = self.photoOutput.maxPhotoQualityPrioritization
+            let wanted: AVCapturePhotoOutput.QualityPrioritization = isBurst ? .speed : .balanced
+            photoSettings.photoQualityPrioritization = wanted.rawValue <= ceiling.rawValue ? wanted : ceiling
             photoSettings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
  
             var live = false
@@ -144,11 +150,19 @@ extension CameraManager {
                 self.armWatchdog(id)
  
                 self.sessionQueue.async {
+                    // Chỉ ghi khi giá trị THỰC SỰ khác. Ghi đè lại y nguyên giá
+                    // trị cũ vẫn khiến AVFoundation cấu hình lại connection và
+                    // xả vòng đệm zero-shutter-lag, làm mất đúng cái ta vừa bật.
                     if let conn = self.photoOutput.connection(with: .video) {
-                        if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
+                        if conn.videoRotationAngle != angle,
+                           conn.isVideoRotationAngleSupported(angle) {
+                            conn.videoRotationAngle = angle
+                        }
                         if conn.isVideoMirroringSupported {
-                            conn.automaticallyAdjustsVideoMirroring = false
-                            conn.isVideoMirrored = mirror
+                            if conn.automaticallyAdjustsVideoMirroring {
+                                conn.automaticallyAdjustsVideoMirroring = false
+                            }
+                            if conn.isVideoMirrored != mirror { conn.isVideoMirrored = mirror }
                         }
                     }
                     self.photoOutput.capturePhoto(with: box.value, delegate: self)

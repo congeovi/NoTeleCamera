@@ -334,6 +334,30 @@ final class CameraManager: NSObject, ObservableObject {
         rotationObservation?.invalidate()
     }
  
+    /// Gom các công tắc quyết định độ trễ màn trập. Phải gọi lại sau MỖI lần
+    /// cấu hình session vì bật Live Photo hoặc depth sẽ làm chúng hết được hỗ
+    /// trợ, và AVFoundation không tự bật lại khi tắt hai thứ đó đi.
+    ///
+    /// • zeroShutterLag: máy giữ sẵn một vòng đệm khung hình và lấy các khung
+    ///   TRƯỚC thời điểm bấm. Không có nó thì máy mới bắt đầu gom khung SAU khi
+    ///   bấm — tay đã nhấc lên, ảnh nhoè, phải đứng yên vài giây mới được ảnh nét.
+    ///   Đây là thứ làm app gốc chụp "bấm là xong".
+    /// • responsiveCapture: cho phép trả về ngay và xử lý ở nền, chụp liên tiếp
+    ///   không phải chờ ảnh trước xử lý xong. Yêu cầu zeroShutterLag đã bật.
+    /// • fastCapturePrioritization: tự hạ chất lượng khi người dùng bấm liên
+    ///   tục. Yêu cầu responsiveCapture đã bật.
+    private nonisolated static func tuneForLowLatency(_ output: AVCapturePhotoOutput) {
+        if output.isZeroShutterLagSupported {
+            output.isZeroShutterLagEnabled = true
+        }
+        if output.isResponsiveCaptureSupported {
+            output.isResponsiveCaptureEnabled = true
+            if output.isFastCapturePrioritizationSupported {
+                output.isFastCapturePrioritizationEnabled = true
+            }
+        }
+    }
+
     // MARK: - Dựng session
  
     private nonisolated func configureSession(startMode: CaptureMode, startLivePhotoOn: Bool) {
@@ -360,10 +384,15 @@ final class CameraManager: NSObject, ObservableObject {
         session.addInput(input)
  
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
-        photoOutput.maxPhotoQualityPrioritization = .quality
+        // .balanced thay vì .quality: .quality cho phép hệ thống kéo dài cửa sổ
+        // gom khung hình (Night mode phơi sáng dài) nên ảnh dễ nhoè nếu tay
+        // chưa kịp đứng yên. .balanced vẫn giữ Deep Fusion / Smart HDR nhưng
+        // chặn trần thời gian — đây cũng là mặc định của AVCapturePhotoOutput.
+        photoOutput.maxPhotoQualityPrioritization = .balanced
         if let maxDim = cam.activeFormat.supportedMaxPhotoDimensions.last {
             photoOutput.maxPhotoDimensions = maxDim
         }
+        Self.tuneForLowLatency(photoOutput)
  
         // ProRAW — chỉ có trên máy Pro. Phải bật ở output trước khi dùng.
         let proRAW = photoOutput.isAppleProRAWSupported
@@ -587,6 +616,17 @@ final class CameraManager: NSObject, ObservableObject {
                 self.session.addOutput(self.movieOutput)
             }
  
+            // Hạ responsive capture TRƯỚC khi bật Live Photo: hai thứ này loại
+            // trừ nhau, bật Live Photo trong lúc responsive còn bật là
+            // AVFoundation ném exception chứ không trả lỗi. tuneForLowLatency ở
+            // cuối khối sẽ bật lại nếu lúc đó vẫn còn được hỗ trợ.
+            if self.photoOutput.isFastCapturePrioritizationEnabled {
+                self.photoOutput.isFastCapturePrioritizationEnabled = false
+            }
+            if self.photoOutput.isResponsiveCaptureEnabled {
+                self.photoOutput.isResponsiveCaptureEnabled = false
+            }
+
             if self.photoOutput.isLivePhotoCaptureSupported {
                 self.photoOutput.isLivePhotoCaptureEnabled = wantsLive
             }
@@ -601,6 +641,11 @@ final class CameraManager: NSObject, ObservableObject {
             if let maxDim = dev.activeFormat.supportedMaxPhotoDimensions.last {
                 self.photoOutput.maxPhotoDimensions = maxDim
             }
+
+            // Bật/tắt Live Photo và depth làm thay đổi khả năng hỗ trợ của
+            // zero shutter lag / responsive capture, nên phải chốt lại mỗi lần
+            // cấu hình — nếu không, thoát Live Photo xong là mất ZSL vĩnh viễn.
+            Self.tuneForLowLatency(self.photoOutput)
  
             self.session.commitConfiguration()
 
@@ -1138,6 +1183,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.armWatchdog(id)
                 self.sessionQueue.async {
                     if let conn = self.photoOutput.connection(with: .video),
+                       conn.videoRotationAngle != angle,
                        conn.isVideoRotationAngleSupported(angle) {
                         conn.videoRotationAngle = angle
                     }
