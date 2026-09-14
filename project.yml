@@ -17,8 +17,6 @@ targets:
           - "Info.plist"
           - ".git/**"
           - ".github/**"
-    info:
-      path: Info.plist
     settings:
       base:
         PRODUCT_NAME: NoTeleCamera
@@ -26,4 +24,6 @@ targets:
         SWIFT_VERSION: "5.9"
         DEVELOPMENT_TEAM: ""
         CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Info.plist
 
