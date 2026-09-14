@@ -230,9 +230,10 @@ struct ContentView: View {
         ZStack {
             Color.black.ignoresSafeArea()
  
+            previewArea
+
             VStack(spacing: 0) {
                 topBar
-                previewArea
                 Spacer(minLength: 0)
                 if !cam.isRecording && !cam.isProcessing {
                     zoomSelector
@@ -324,14 +325,8 @@ struct ContentView: View {
                 centerBadge("\(cam.timeLapseFrames) khung")
             }
         }
-        .aspectRatio(previewAspect, contentMode: .fit)
-        .clipped()
-        .animation(.easeInOut(duration: 0.2), value: cam.settings.aspect)
-    }
- 
-    /// Chế độ quay dùng khung 16:9, chế độ ảnh theo tỉ lệ người dùng chọn.
-    private var previewAspect: CGFloat {
-        cam.settings.mode.isRecordingMode ? AspectRatio.r16x9.value : cam.settings.aspect.value
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea()
     }
  
     private func centerBadge(_ text: String) -> some View {
