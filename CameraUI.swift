@@ -14,24 +14,37 @@ import SwiftUI
 final class PreviewUIView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+
+    /// Chụp lại khung hình đang hiển thị để làm ảnh đóng băng che nháy hình
+    /// khi applyMode cấu hình lại session (đổi preset/format làm AVFoundation
+    /// tự renegotiate, rớt mất một khung hình thật).
+    func snapshotImage() -> UIImage? {
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        let renderer = UIGraphicsImageRenderer(bounds: bounds)
+        return renderer.image { ctx in
+            previewLayer.render(in: ctx.cgContext)
+        }
+    }
 }
- 
+
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
     let onTap: (CGPoint, CGPoint) -> Void
     let onLongPress: (CGPoint, CGPoint) -> Void
- 
+    var onViewReady: (PreviewUIView) -> Void = { _ in }
+
     func makeUIView(context: Context) -> PreviewUIView {
         let view = PreviewUIView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
- 
+
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         let long = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLong(_:)))
         long.minimumPressDuration = 0.6
         view.addGestureRecognizer(tap)
         view.addGestureRecognizer(long)
         context.coordinator.view = view
+        onViewReady(view)
         return view
     }
  
@@ -224,6 +237,8 @@ struct ContentView: View {
     @State private var shutterDrag: CGFloat = 0
     @State private var isPinching = false
     @State private var shutterFlashOpacity: Double = 0
+    @State private var previewUIView: PreviewUIView?
+    @State private var modeFreezeFrame: UIImage?
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
  
@@ -298,7 +313,8 @@ struct ContentView: View {
                     cam.focus(at: dp, uiPoint: up)
                     withAnimation { showEV = true }
                 },
-                onLongPress: { dp, up in cam.lockFocusAndExposure(at: dp, uiPoint: up) }
+                onLongPress: { dp, up in cam.lockFocusAndExposure(at: dp, uiPoint: up) },
+                onViewReady: { previewUIView = $0 }
             )
             // Chốt mức zoom ngay khi cử chỉ bắt đầu. Bản cũ dùng .onTapGesture
             // để làm việc này, nhưng nó chồng lên UITapGestureRecognizer bên
@@ -318,6 +334,18 @@ struct ContentView: View {
                     }
             )
  
+            // Ảnh đóng băng phủ lên trong lúc applyMode cấu hình lại session
+            // (đổi mode ảnh/video/chân dung...). Che đúng lúc AVFoundation
+            // renegotiate preset/format nên người dùng thấy chuyển mượt thay
+            // vì thấy khung hình nháy/đen.
+            if let modeFreezeFrame {
+                Image(uiImage: modeFreezeFrame)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .allowsHitTesting(false)
+                    .transition(.identity)
+            }
+
             if cam.settings.gridOn { GridOverlay() }
             if cam.settings.levelOn { LevelOverlay(roll: cam.rollAngle, isLevel: cam.isLevel) }
             if let fp = cam.focusPoint { focusIndicator(at: fp) }
@@ -341,6 +369,18 @@ struct ContentView: View {
         }
     }
  
+    /// Chụp khung hình cuối cùng trước khi đổi mode và giữ nó phủ lên preview
+    /// một nhịp. applyMode đổi sessionPreset/activeFormat trên một session
+    /// đang chạy nên AVFoundation luôn rớt/đóng băng một khung hình thật lúc
+    /// renegotiate — che bằng ảnh tĩnh này để mắt không thấy nháy.
+    private func freezePreviewForModeSwitch() {
+        guard let image = previewUIView?.snapshotImage() else { return }
+        modeFreezeFrame = image
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            withAnimation(.easeOut(duration: 0.15)) { modeFreezeFrame = nil }
+        }
+    }
+
     private func centerBadge(_ text: String) -> some View {
         VStack {
             Spacer()
@@ -534,6 +574,9 @@ struct ContentView: View {
                     Color.clear.frame(width: 60)
                     ForEach(CaptureMode.ordered) { m in
                         Button {
+                            if m != cam.settings.mode, !cam.isRecording, !cam.isProcessing {
+                                freezePreviewForModeSwitch()
+                            }
                             withAnimation(.easeOut(duration: 0.2)) {
                                 cam.setMode(m)
                                 proxy.scrollTo(m.id, anchor: .center)

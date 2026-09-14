@@ -554,16 +554,25 @@ final class CameraManager: NSObject, ObservableObject {
                     dev.unlockForConfiguration()
                 }
                 let preset = (mode == .video) ? quality.preset : AVCaptureSession.Preset.hd1920x1080
-                if self.session.canSetSessionPreset(preset) { self.session.sessionPreset = preset }
+                // Gán lại preset dù giá trị không đổi (vd. video→timelapse
+                // cùng 1080p) vẫn khiến AVFoundation renegotiate và nháy
+                // hình vô ích — chỉ gán khi thực sự khác.
+                if self.session.sessionPreset != preset, self.session.canSetSessionPreset(preset) {
+                    self.session.sessionPreset = preset
+                }
                 if mode == .video { Self.applyFrameRate(quality.fps, to: dev) }
- 
+
             case .photo, .portrait:
                 if let defFormat, dev.activeFormat != defFormat {
                     try? dev.lockForConfiguration()
                     dev.activeFormat = defFormat
                     dev.unlockForConfiguration()
                 }
-                if self.session.canSetSessionPreset(.photo) { self.session.sessionPreset = .photo }
+                // Photo↔portrait giữ nguyên preset .photo — tránh gán lại để
+                // khỏi renegotiate không cần thiết.
+                if self.session.sessionPreset != .photo, self.session.canSetSessionPreset(.photo) {
+                    self.session.sessionPreset = .photo
+                }
             }
  
             // Live Photo VÀ depth đều không sống chung với movie output.
