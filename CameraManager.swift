@@ -199,8 +199,10 @@ final class CameraManager: NSObject, ObservableObject {
             locationManager.requestWhenInUseAuthorization()
             locationManager.startUpdatingLocation()
  
+            let startMode = settings.mode
+            let startLivePhotoOn = settings.livePhotoOn
             sessionQueue.async { [weak self] in
-                self?.configureSession()
+                self?.configureSession(startMode: startMode, startLivePhotoOn: startLivePhotoOn)
                 self?.session.startRunning()
             }
             startMotion()
@@ -330,7 +332,7 @@ final class CameraManager: NSObject, ObservableObject {
  
     // MARK: - Dựng session
  
-    private nonisolated func configureSession() {
+    private nonisolated func configureSession(startMode: CaptureMode, startLivePhotoOn: Bool) {
         session.beginConfiguration()
         session.sessionPreset = .photo
  
@@ -368,9 +370,15 @@ final class CameraManager: NSObject, ObservableObject {
         let livePhoto = photoOutput.isLivePhotoCaptureSupported
         let depth = photoOutput.isDepthDataDeliverySupported
  
-        // Movie output thêm sẵn để QuickTake không phải dựng lại session.
-        // applyMode sẽ gỡ ra nếu chế độ Ảnh cần Live Photo.
-        if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+        // Movie output thêm sẵn để QuickTake không phải dựng lại session,
+        // TRỪ KHI chế độ khởi động đã cần Live Photo/Depth — hai thứ này
+        // không sống chung được với movie output. Thêm rồi để applyMode gỡ
+        // ngay sau startRunning() sẽ cấu hình lại một session đang chạy,
+        // gây nháy hình preview và đôi khi làm AVFoundation renegotiate lại
+        // activeFormat, reset videoZoomFactor về 0.5x (ống siêu rộng).
+        let needsPhotoOnlyAtStart = (startMode == .photo && startLivePhotoOn && livePhoto)
+            || (startMode == .portrait && depth)
+        if !needsPhotoOnlyAtStart, session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
  
         // Quét mã QR / mã vạch.
         if session.canAddOutput(metadataOutput) {
