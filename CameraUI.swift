@@ -223,6 +223,7 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var shutterDrag: CGFloat = 0
     @State private var isPinching = false
+    @State private var shutterFlashOpacity: Double = 0
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
  
@@ -324,9 +325,20 @@ struct ContentView: View {
             if cam.isRecording && cam.settings.mode == .timelapse {
                 centerBadge("\(cam.timeLapseFrames) khung")
             }
+
+            // Nháy trắng ngay lúc bấm máy, giống Camera gốc — bằng chứng
+            // trực quan rằng đã chụp, vì isCapturing đôi khi trả về quá
+            // nhanh để mắt kịp thấy nút thu nhỏ lại.
+            Color.white
+                .opacity(shutterFlashOpacity)
+                .allowsHitTesting(false)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
+        .onChange(of: cam.shutterFlashTrigger) { _, _ in
+            shutterFlashOpacity = 0.9
+            withAnimation(.easeOut(duration: 0.25)) { shutterFlashOpacity = 0 }
+        }
     }
  
     private func centerBadge(_ text: String) -> some View {

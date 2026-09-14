@@ -74,7 +74,8 @@ extension CameraManager {
  
         capturesInFlight += 1
         isCapturing = true
- 
+        shutterFlashTrigger += 1
+
         sessionQueue.async { [weak self] in
             guard let self else { return }
  

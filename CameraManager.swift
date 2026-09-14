@@ -51,6 +51,10 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var lastThumbnail: UIImage?
     @Published var focusPoint: CGPoint?
     @Published var isCapturing = false
+    /// Tăng mỗi lần bấm máy thật sự (kể cả burst) để UI bắn hiệu ứng nháy
+    /// trắng như Camera gốc — không dùng isCapturing vì nó giữ true suốt
+    /// quá trình xử lý, còn nháy thì chỉ cần một cái chớp ngay lúc bấm.
+    @Published var shutterFlashTrigger = 0
     @Published var isFront = false
     @Published var errorMessage: String?
     @Published var statusMessage: String?
