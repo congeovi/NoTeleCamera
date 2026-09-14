@@ -594,10 +594,20 @@ final class CameraManager: NSObject, ObservableObject {
             }
  
             self.session.commitConfiguration()
- 
+
+            // Đổi chế độ ảnh ↔ video có thể khiến AVFoundation renegotiate
+            // activeFormat và tự ý đặt lại videoZoomFactor (thường về mức
+            // 0,5x của ống siêu rộng). Ép lại về mốc 1x ngay tại đây để zoom
+            // hiển thị luôn về 1.0 sau khi chuyển chế độ, không kẹt ở 0.5.
+            let switchOver = CGFloat(dev.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1.0)
+            try? dev.lockForConfiguration()
+            dev.videoZoomFactor = switchOver
+            dev.unlockForConfiguration()
+
             Task { @MainActor in
+                self.baseFactor = switchOver
                 self.applyMacroIfNeeded()
-                self.displayZoom = self.currentDisplayZoom()
+                self.displayZoom = 1.0
                 if wantsMic {
                     self.attachAudioIfNeeded()
                 } else if !self.isRecording {
@@ -631,11 +641,6 @@ final class CameraManager: NSObject, ObservableObject {
             dev.activeVideoMaxFrameDuration = d
         }
         dev.unlockForConfiguration()
-    }
- 
-    private func currentDisplayZoom() -> CGFloat {
-        guard let device else { return 1.0 }
-        return device.videoZoomFactor / baseFactor
     }
  
     // MARK: - Macro
