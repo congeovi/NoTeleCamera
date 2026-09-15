@@ -76,9 +76,18 @@ Thêm vào Info.plist, thiếu là app crash:
  
 Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
  
-- [x] Cuộn tự canh giữa chế độ đang chọn
+- [x] Cuộn tự canh giữa chế độ đang chọn, dù đổi bằng nút hay bằng vuốt
 - [x] Chế độ đang chọn màu vàng
 - [x] Khoá không cho đổi chế độ khi đang quay hoặc đang xuất file
+- [x] Vuốt ngang trên khung ngắm: sang trái → chế độ kế tiếp, sang phải → chế độ
+      trước, một bước mỗi cử chỉ, kẹp ở hai đầu (không xoay vòng). Dùng chung
+      đường với nút bấm nên cũng đóng băng khung hình + mờ khi chuyển, và cũng
+      bị khoá khi đang quay / đang xuất file / đang chụp liên tiếp
+- [x] Phải vuốt dứt khoát (quãng ngón tay khoảng 60 point) mới đổi; vuốt ngắn
+      hơn thì thả tay ra chế độ vẫn giữ nguyên. Mỗi lần đổi kèm một nhịp rung nhẹ
+- [x] Một cú vuốt chỉ ăn đúng một việc: vuốt hơi chéo không vừa đổi chế độ vừa
+      nhảy EV, và vuốt dọc chỉnh EV vẫn bám 1:1 theo ngón tay ngay từ điểm bắt
+      đầu chứ không nhảy sẵn một nấc
 - [x] Ba chế độ ghi hình (video / quay chậm / tua nhanh) dùng nút chụp
       kiểu bật-tắt; hai chế độ ảnh dùng kiểu bấm-nhả
 ## 5. Chụp ảnh

@@ -36,6 +36,12 @@ struct CameraPreview: UIViewRepresentable {
     /// trong vùng của nó, làm không lấy nét lại hay khoá AE/AF được ngay cạnh
     /// ô vàng đang hiện.
     var onVerticalDrag: (UIGestureRecognizer.State, CGFloat) -> Void = { _, _ in }
+    /// Vuốt ngang một ngón để đổi chế độ. Dùng CHUNG một
+    /// UIPanGestureRecognizer với vuốt dọc chỉnh EV — hướng chốt một lần khi
+    /// ngón tay đi đủ xa (xem `Coordinator.Axis`), nên hai việc không giành
+    /// nhau. Cử chỉ phải nằm ở đây chứ không phải `.gesture` của SwiftUI, cùng
+    /// lý do đã ghi ở trên.
+    var onHorizontalDrag: (UIGestureRecognizer.State, CGFloat) -> Void = { _, _ in }
     var onViewReady: (PreviewUIView) -> Void = { _ in }
 
     func makeUIView(context: Context) -> PreviewUIView {
@@ -65,8 +71,22 @@ struct CameraPreview: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     final class Coordinator: NSObject {
+        /// Hướng đã chốt của cử chỉ đang chạy. nil = ngón tay chưa đi đủ xa
+        /// để biết là vuốt ngang (đổi chế độ) hay vuốt dọc (chỉnh EV).
+        enum Axis { case horizontal, vertical }
+
+        /// Ngón tay phải đi đủ quãng này mới chốt được hướng — dưới mức đó
+        /// một cú chạm hơi lệch tay chưa bị hiểu thành vuốt.
+        static let axisLockDistance: CGFloat = 12
+
         var parent: CameraPreview
         weak var view: PreviewUIView?
+        private var axis: Axis?
+        /// Nhánh nào đã thực sự nhận `.began` thì mới được nhận `.ended` —
+        /// nhánh chưa từng bắt đầu mà nhận kết thúc thì bên kia làm việc thừa
+        /// (hẹn giờ ẩn ô vàng, nhả cờ một-bước của vuốt chế độ).
+        private var verticalBegun = false
+        private var horizontalBegun = false
         init(_ parent: CameraPreview) { self.parent = parent }
 
         @objc func handleTap(_ g: UITapGestureRecognizer) {
@@ -84,7 +104,57 @@ struct CameraPreview: UIViewRepresentable {
 
         @objc func handlePan(_ g: UIPanGestureRecognizer) {
             guard let view else { return }
-            parent.onVerticalDrag(g.state, g.translation(in: view).y)
+            var t = g.translation(in: view)
+
+            switch g.state {
+            case .began:
+                // Chưa biết người dùng định vuốt ngang hay dọc — đo đã.
+                axis = nil
+                verticalBegun = false
+                horizontalBegun = false
+
+            case .changed:
+                if axis == nil {
+                    // Ưu tiên dọc 1,5×: chỉnh EV chỉ có đúng cử chỉ này, còn
+                    // vuốt ngang là việc mới nên nhường.
+                    guard max(abs(t.x), abs(t.y)) >= Self.axisLockDistance else { return }
+                    axis = abs(t.x) > abs(t.y) * 1.5 ? .horizontal : .vertical
+                    // Dời mốc về đúng điểm chốt hướng, nên mọi giá trị gửi đi
+                    // sau đây đều tính từ đó. Không dời thì quãng đã tiêu để
+                    // chốt hướng (cộng cả slop sẵn có của UIPanGestureRecognizer)
+                    // bị tính luôn vào giá trị đầu tiên — EV nhảy sẵn một nấc
+                    // ngay khi vừa bắt đầu vuốt, trong khi nó phải bám 1:1
+                    // theo ngón tay.
+                    g.setTranslation(.zero, in: view)
+                    t = .zero
+                }
+                if axis == .vertical {
+                    if !verticalBegun {
+                        verticalBegun = true
+                        parent.onVerticalDrag(.began, t.y)
+                    }
+                    parent.onVerticalDrag(.changed, t.y)
+                } else {
+                    if !horizontalBegun {
+                        horizontalBegun = true
+                        parent.onHorizontalDrag(.began, t.x)
+                    }
+                    parent.onHorizontalDrag(.changed, t.x)
+                }
+
+            default:
+                // `.ended` / `.cancelled` / `.failed` — chỉ báo cho nhánh đã
+                // thực sự bắt đầu, và chốt lại hướng cho cử chỉ kế tiếp.
+                if verticalBegun {
+                    verticalBegun = false
+                    parent.onVerticalDrag(g.state, t.y)
+                }
+                if horizontalBegun {
+                    horizontalBegun = false
+                    parent.onHorizontalDrag(g.state, t.x)
+                }
+                axis = nil
+            }
         }
     }
 }
@@ -435,6 +505,9 @@ struct ContentView: View {
     @State private var pinchStart: CGFloat = 1.0
     @State private var showSettings = false
     @State private var shutterDrag: CGFloat = 0
+    /// Cú vuốt ngang trên khung ngắm chỉ được đổi ĐÚNG MỘT chế độ: cờ này chốt
+    /// lại ngay sau bước đầu tiên và chỉ mở khi nhấc tay.
+    @State private var modeSwipeConsumed = false
     @State private var isPinching = false
     @State private var shutterFlashOpacity: Double = 0
     @State private var previewUIView: PreviewUIView?
@@ -452,6 +525,11 @@ struct ContentView: View {
     /// màn hình nhạt dần — đúng thứ opaque: true sinh ra để chặn, và lượt sau
     /// không cứu lại được.
     private static let modeSwitchBlurRadius: CGFloat = 64
+    /// Bao nhiêu point vuốt ngang thì đổi một chế độ, tính TỪ LÚC CHỐT HƯỚNG
+    /// (`CameraPreview.Coordinator` đã dời mốc về đó). 48 point ở đây cộng 12
+    /// point chốt hướng là đúng 60 point ngón tay thật sự phải đi — quãng của
+    /// một cú vuốt dứt khoát, mà cú chạm lấy nét hơi lệch tay thì không tới.
+    private static let modeSwipeThreshold: CGFloat = 48
     /// Độ đục của ảnh đóng băng — rượt về 0 cùng lúc blur tan để chuyển mượt
     /// sang khung sống bên dưới.
     @State private var freezeOpacity: Double = 1
@@ -546,6 +624,20 @@ struct ContentView: View {
                     case .began:   cam.beginExposureDrag()
                     case .changed: cam.updateExposureDrag(translationY: translationY)
                     default:       cam.endExposureDrag()
+                    }
+                },
+                // Vuốt ngang để đổi chế độ. Cử chỉ dùng chung một
+                // UIPanGestureRecognizer với vuốt dọc chỉnh EV — Coordinator đã
+                // chốt hướng nên ở đây chỉ còn một việc.
+                onHorizontalDrag: { state, translationX in
+                    switch state {
+                    case .changed: handleModeSwipe(translationX)
+                    // Nhấc tay / bị huỷ → mở khoá cho cú vuốt kế tiếp. Đây là
+                    // chỗ DUY NHẤT nhả cờ, và thế là đủ: cờ chỉ chốt được khi
+                    // nhánh ngang đã bắt đầu, mà nhánh đã bắt đầu thì chắc chắn
+                    // nhận được kết thúc của chính cử chỉ đó.
+                    case .ended, .cancelled, .failed: modeSwipeConsumed = false
+                    default: break
                     }
                 },
                 onViewReady: { previewUIView = $0 }
@@ -649,19 +741,66 @@ struct ContentView: View {
         }
     }
  
+    // MARK: Đổi chế độ
+
+    /// Đổi chế độ kèm hiệu ứng chuyển — dùng chung cho cả nút bấm trên thanh
+    /// chế độ lẫn cú vuốt ngang trên khung ngắm, nên hai đường không thể lệch
+    /// hành vi nhau. Đây cũng là NƠI DUY NHẤT giữ điều kiện được phép đổi, các
+    /// chỗ gọi chỉ đọc kết quả trả về chứ đừng kiểm lại.
+    ///
+    /// Chặn thêm `isBursting`: đang chụp liên tiếp mà dựng lại session thì mẻ
+    /// ảnh đang chạy bị mất cấu hình giữa chừng.
+    ///
+    /// - Returns: `true` nếu chế độ thật sự đổi.
+    @discardableResult
+    private func applyModeSelection(_ m: CaptureMode) -> Bool {
+        guard m != cam.settings.mode, !cam.isRecording, !cam.isProcessing,
+              !cam.isBursting else { return false }
+        freezePreviewForModeSwitch()
+        withAnimation(.easeOut(duration: 0.2)) { cam.setMode(m) }
+        return true
+    }
+
+    /// Vuốt sang trái → chế độ kế tiếp, sang phải → chế độ trước. Một bước cho
+    /// mỗi cử chỉ như Camera gốc; kẹp ở hai đầu, không xoay vòng.
+    private func handleModeSwipe(_ translationX: CGFloat) {
+        guard !modeSwipeConsumed else { return }
+        guard abs(translationX) >= Self.modeSwipeThreshold else { return }
+        let list = CaptureMode.ordered
+        guard let i = list.firstIndex(of: cam.settings.mode) else { return }
+        let next = translationX < 0 ? i + 1 : i - 1
+        guard list.indices.contains(next) else { return }
+        // Chỉ chốt cờ và rung khi chế độ ĐÃ đổi thật — đang quay / đang xuất
+        // file / đang chụp liên tiếp thì không rung suông. Chốt sau vẫn kịp:
+        // applyModeSelection chạy đồng bộ trên main actor, .changed kế tiếp của
+        // cử chỉ phải đợi vòng run loop sau nên không thể chen vào giữa.
+        guard applyModeSelection(list[next]) else { return }
+        modeSwipeConsumed = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
     /// Chụp khung hình cuối cùng trước khi đổi mode và giữ nó phủ lên preview.
     /// Bắt đầu hiệu ứng chuyển chế độ: chốt khung hình cuối làm nền và mờ dần
     /// vào ngay khi bấm mode. Ảnh đóng băng che đúng lúc AVFoundation
     /// renegotiate preset/format; lớp mờ chỉ tan khi CameraManager báo camera
     /// đã sẵn sàng (xem onChange của isModeTransitioning).
     private func freezePreviewForModeSwitch() {
-        guard let image = previewUIView?.snapshotImage() else { return }
+        // Lần chuyển trước còn đang phủ ảnh đóng băng thì GIỮ NGUYÊN ảnh đó.
+        // snapshotImage() chỉ chụp previewLayer chứ không chụp lớp phủ, mà lúc
+        // này layer đang là khung AVFoundation renegotiate dở — chụp đè là thay
+        // ảnh đẹp bằng khung đen. Vuốt liên tiếp (ẢNH → VIDEO là hai bước) làm
+        // tình huống này thành thường gặp chứ không còn hiếm như hồi chỉ có nút.
+        if modeFreezeFrame == nil {
+            guard let image = previewUIView?.snapshotImage() else { return }
+            modeFreezeFrame = image
+            switchBlur = 0
+        }
         modeSwitchGeneration += 1
         let gen = modeSwitchGeneration
         modeSwitchStartedAt = Date()
+        // Kể cả khi giữ ảnh cũ: lần tan mờ trước có thể đang chạy dở (độ đục
+        // đang rượt về 0), lần chuyển mới phải kéo nó đục trở lại.
         freezeOpacity = 1
-        switchBlur = 0
-        modeFreezeFrame = image
         withAnimation(.easeIn(duration: 0.15)) { switchBlur = Self.modeSwitchBlurRadius }
         // Lưới an toàn thứ hai của UI: nếu cả tín hiệu sẵn sàng lẫn watchdog
         // của CameraManager đều mất, vẫn phải tan mờ.
@@ -894,12 +1033,14 @@ struct ContentView: View {
                     Color.clear.frame(width: 60)
                     ForEach(CaptureMode.ordered) { m in
                         Button {
-                            if m != cam.settings.mode, !cam.isRecording, !cam.isProcessing {
-                                freezePreviewForModeSwitch()
-                            }
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                cam.setMode(m)
-                                proxy.scrollTo(m.id, anchor: .center)
+                            if m == cam.settings.mode {
+                                // Bấm lại chế độ đang chọn không đổi gì, nhưng
+                                // vẫn canh giữa lại thanh — như bản cũ làm.
+                                withAnimation(.easeOut(duration: 0.25)) {
+                                    proxy.scrollTo(m.id, anchor: .center)
+                                }
+                            } else {
+                                applyModeSelection(m)
                             }
                         } label: {
                             Text(m.label)
@@ -913,6 +1054,12 @@ struct ContentView: View {
                 .padding(.vertical, 8)
             }
             .onAppear { proxy.scrollTo(cam.settings.mode.id, anchor: .center) }
+            // Chế độ có thể đổi từ nút bấm hoặc từ cú vuốt ngang trên khung
+            // ngắm — bám theo `settings.mode` để thanh luôn canh giữa đúng chế
+            // độ, không phụ thuộc nguồn đổi.
+            .onChange(of: cam.settings.mode) { _, m in
+                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(m.id, anchor: .center) }
+            }
         }
         .frame(height: 34)
         .padding(.bottom, 6)
