@@ -31,6 +31,11 @@ struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
     let onTap: (CGPoint, CGPoint) -> Void
     let onLongPress: (CGPoint, CGPoint) -> Void
+    /// Vuốt dọc một ngón để chỉnh EV. Cử chỉ nằm ở đây chứ không phải trên lớp
+    /// phủ SwiftUI: một view SwiftUI có .gesture sẽ nuốt cả chạm lẫn giữ lâu
+    /// trong vùng của nó, làm không lấy nét lại hay khoá AE/AF được ngay cạnh
+    /// ô vàng đang hiện.
+    var onVerticalDrag: (UIGestureRecognizer.State, CGFloat) -> Void = { _, _ in }
     var onViewReady: (PreviewUIView) -> Void = { _ in }
 
     func makeUIView(context: Context) -> PreviewUIView {
@@ -41,38 +46,116 @@ struct CameraPreview: UIViewRepresentable {
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         let long = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLong(_:)))
         long.minimumPressDuration = 0.6
+        // Một ngón thôi — hai ngón là cử chỉ zoom, để MagnifyGesture lo.
+        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        pan.maximumNumberOfTouches = 1
         view.addGestureRecognizer(tap)
         view.addGestureRecognizer(long)
+        view.addGestureRecognizer(pan)
         context.coordinator.view = view
         onViewReady(view)
         return view
     }
- 
-    func updateUIView(_ uiView: PreviewUIView, context: Context) {}
+
+    func updateUIView(_ uiView: PreviewUIView, context: Context) {
+        // Coordinator giữ bản sao struct từ lúc khởi tạo; các closure bên trong
+        // bắt CameraManager (class) nên không cũ, nhưng vẫn refresh cho chắc.
+        context.coordinator.parent = self
+    }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
- 
+
     final class Coordinator: NSObject {
-        let parent: CameraPreview
+        var parent: CameraPreview
         weak var view: PreviewUIView?
         init(_ parent: CameraPreview) { self.parent = parent }
- 
+
         @objc func handleTap(_ g: UITapGestureRecognizer) {
             guard let view else { return }
             let p = g.location(in: view)
             parent.onTap(view.previewLayer.captureDevicePointConverted(fromLayerPoint: p), p)
         }
- 
+
         @objc func handleLong(_ g: UILongPressGestureRecognizer) {
             guard g.state == .began, let view else { return }
             let p = g.location(in: view)
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             parent.onLongPress(view.previewLayer.captureDevicePointConverted(fromLayerPoint: p), p)
         }
+
+        @objc func handlePan(_ g: UIPanGestureRecognizer) {
+            guard let view else { return }
+            parent.onVerticalDrag(g.state, g.translation(in: view).y)
+        }
     }
 }
  
 // MARK: - Lớp phủ
- 
+
+/// Ô vàng lấy nét kèm đường ray EV, kiểu Camera gốc. Thuần hiển thị — mọi cử
+/// chỉ do CameraPreview bên dưới xử lý (xem `onVerticalDrag`).
+struct FocusIndicatorView: View {
+    let point: CGPoint
+    let bias: Float
+    /// Bề ngang của khung preview, để biết ô vàng có sát mép phải không.
+    let containerWidth: CGFloat
+
+    @State private var appearScale: CGFloat = 1.35
+
+    private let boxSize: CGFloat = 70
+    /// Nửa quãng đường của mặt trời = 2 nấc EV. 66 / 2 = 33 point mỗi nấc,
+    /// khớp đúng `CameraManager.evDragPointsPerStop` nên icon bám tay 1:1.
+    private let halfTrack: CGFloat = 66
+
+    var body: some View {
+        let sunSide: CGFloat = (point.x > containerWidth - 90) ? -1 : 1
+        let clamped = min(max(bias, -2.0), 2.0)
+        let sunY = -CGFloat(clamped / 2.0) * halfTrack
+
+        ZStack {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(.yellow, lineWidth: 1.2)
+                .frame(width: boxSize, height: boxSize)
+                .scaleEffect(appearScale)
+
+            // Đường ray dẫn hướng + icon mặt trời chỉ mức EV hiện tại.
+            ZStack {
+                Rectangle()
+                    .fill(.yellow.opacity(0.35))
+                    .frame(width: 1.5, height: halfTrack * 2)
+
+                Image(systemName: "sun.max.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.yellow)
+                    .shadow(color: .black.opacity(0.4), radius: 2, x: 0, y: 1)
+                    .overlay(alignment: sunSide > 0 ? .leading : .trailing) {
+                        // Số EV chỉ hiện khi đã lệch khỏi 0, như Camera gốc.
+                        if clamped != 0 {
+                            Text(String(format: "%+.1f", clamped))
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.yellow)
+                                .shadow(color: .black.opacity(0.5), radius: 2)
+                                .fixedSize()
+                                .offset(x: sunSide > 0 ? 20 : -20)
+                        }
+                    }
+                    .offset(y: sunY)
+            }
+            .offset(x: sunSide * (boxSize / 2 + 20))
+        }
+        .position(point)
+        .onAppear { snapIn() }
+        .onChange(of: point) { _, _ in snapIn() }
+    }
+
+    /// Nảy nhẹ rồi co về 1× — nhịp lò xo của Camera gốc.
+    private func snapIn() {
+        appearScale = 1.35
+        withAnimation(.spring(response: 0.25, dampingFraction: 0.65)) {
+            appearScale = 1.0
+        }
+    }
+}
+
 struct GridOverlay: View {
     var body: some View {
         GeometryReader { geo in
@@ -232,7 +315,6 @@ struct ContentView: View {
     @StateObject private var cam = CameraManager()
     @StateObject private var volume = VolumeShutter()
     @State private var pinchStart: CGFloat = 1.0
-    @State private var showEV = false
     @State private var showSettings = false
     @State private var shutterDrag: CGFloat = 0
     @State private var isPinching = false
@@ -264,7 +346,6 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                 if !cam.isRecording && !cam.isProcessing {
                     zoomSelector
-                    if showEV { evSlider }
                     if cam.settings.mode == .portrait { portraitSlider }
                     modeSelector
                 }
@@ -320,11 +401,15 @@ struct ContentView: View {
         ZStack {
             CameraPreview(
                 session: cam.session,
-                onTap: { dp, up in
-                    cam.focus(at: dp, uiPoint: up)
-                    withAnimation { showEV = true }
-                },
+                onTap: { dp, up in cam.focus(at: dp, uiPoint: up) },
                 onLongPress: { dp, up in cam.lockFocusAndExposure(at: dp, uiPoint: up) },
+                onVerticalDrag: { state, translationY in
+                    switch state {
+                    case .began:   cam.beginExposureDrag()
+                    case .changed: cam.updateExposureDrag(translationY: translationY)
+                    default:       cam.endExposureDrag()
+                    }
+                },
                 onViewReady: { previewUIView = $0 }
             )
             // Chốt mức zoom ngay khi cử chỉ bắt đầu. Bản cũ dùng .onTapGesture
@@ -349,6 +434,7 @@ struct ContentView: View {
             .blur(radius: (modeFreezeFrame == nil && cam.isModeTransitioning) ? 16 : 0)
             .animation(.easeIn(duration: 0.15), value: cam.isModeTransitioning)
  
+
             // Ảnh đóng băng phủ lên trong lúc applyMode cấu hình lại session
             // (đổi mode ảnh/video/chân dung...). Che đúng lúc AVFoundation
             // renegotiate preset/format nên người dùng thấy chuyển mượt thay
@@ -366,7 +452,15 @@ struct ContentView: View {
 
             if cam.settings.gridOn { GridOverlay() }
             if cam.settings.levelOn { LevelOverlay(roll: cam.rollAngle, isLevel: cam.isLevel) }
-            if let fp = cam.focusPoint { focusIndicator(at: fp) }
+            if let fp = cam.focusPoint {
+                GeometryReader { geo in
+                    FocusIndicatorView(point: fp,
+                                       bias: cam.exposureBias,
+                                       containerWidth: geo.size.width)
+                }
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
             if cam.isBursting { centerBadge("\(cam.burstCount)") }
             if cam.isRecording && cam.settings.mode == .timelapse {
                 centerBadge("\(cam.timeLapseFrames) khung")
@@ -597,22 +691,6 @@ struct ContentView: View {
         }
     }
  
-    private var evSlider: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sun.max.fill").font(.system(size: 13)).foregroundStyle(.yellow)
-            Slider(value: Binding(
-                get: { Double(cam.exposureBias) },
-                set: { cam.setExposureBias(Float($0)) }
-            ), in: -2...2, step: 0.1)
-            .tint(.yellow)
-            Text(String(format: "%+.1f", cam.exposureBias))
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(.white).frame(width: 36)
-        }
-        .padding(.horizontal, 26).padding(.bottom, 6)
-        .transition(.opacity)
-    }
- 
     private var portraitSlider: some View {
         HStack(spacing: 10) {
             Image(systemName: "f.cursive").font(.system(size: 13)).foregroundStyle(.yellow)
@@ -838,13 +916,6 @@ struct ContentView: View {
             Spacer()
         }
         .transition(.move(edge: .top).combined(with: .opacity))
-    }
- 
-    private func focusIndicator(at point: CGPoint) -> some View {
-        RoundedRectangle(cornerRadius: 4)
-            .stroke(.yellow, lineWidth: 1.2)
-            .frame(width: 74, height: 74)
-            .position(point)
     }
  
     private func timeString(_ t: TimeInterval) -> String {

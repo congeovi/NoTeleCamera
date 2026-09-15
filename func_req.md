@@ -56,10 +56,18 @@ Thêm vào Info.plist, thiếu là app crash:
 ## 3. Lấy nét & phơi sáng
  
 - [x] Chạm để lấy nét + đo sáng tại điểm chạm
-- [x] Ô vàng hiện tại điểm chạm, tự ẩn sau 1,5 giây
+- [x] Ô vàng hiện tại điểm chạm, nảy 1,35× rồi co về 1× (lò xo, kiểu iOS),
+      tự ẩn sau 3,5 giây
 - [x] Giữ lâu 0,6 giây để khoá AE/AF, kèm phản hồi rung
 - [x] Huy hiệu "AE/AF LOCK" ở thanh trên, bấm vào để mở khoá
-- [x] Thanh trượt EV từ −2 đến +2, hiện số, xuất hiện sau khi chạm lấy nét
+- [x] Chỉnh EV (−2 đến +2) bằng vuốt dọc một ngón trên preview khi ô vàng đang
+      hiện; icon mặt trời chạy trên đường ray cạnh ô, bám 1:1 theo ngón tay và
+      hiện số khi lệch khỏi 0. Không còn thanh trượt EV ngang ở đáy màn hình
+- [x] Đang vuốt thì ô vàng đứng yên, chỉ đếm 3,5 giây sau khi nhấc ngón tay ra
+- [x] Lia máy sang cảnh mới (`subjectAreaDidChangeNotification`): ô vàng mờ dần
+      rồi biến mất, camera trở lại Continuous AF/AE và EV về 0
+- [x] Đang khoá AE/AF thì lia máy không làm mất khoá
+- [x] Chạm điểm mới trả EV về 0, như Camera gốc
 - [x] Reset EV và mở khoá khi đổi camera trước/sau
 ## 4. Năm chế độ
  

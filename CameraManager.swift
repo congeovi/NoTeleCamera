@@ -344,6 +344,20 @@ final class CameraManager: NSObject, ObservableObject {
                 }
             }
         )
+
+        // object: nil vì device đổi mỗi lần lật camera trước/sau, không gắn cứng
+        // được một object lúc đăng ký. Lọc lại trong handler để không ăn thông
+        // báo của thiết bị khác (ví dụ camera vừa bị gỡ khỏi session).
+        notificationTokens.append(
+            nc.addObserver(forName: AVCaptureDevice.subjectAreaDidChangeNotification,
+                           object: nil, queue: .main) { [weak self] note in
+                let sender = note.object as? AVCaptureDevice
+                Task { @MainActor in
+                    guard let self, sender === self.device else { return }
+                    self.subjectAreaDidChange()
+                }
+            }
+        )
     }
  
     deinit {
@@ -445,6 +459,9 @@ final class CameraManager: NSObject, ObservableObject {
         let switchOver = CGFloat(cam.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1.0)
         try? cam.lockForConfiguration()
         cam.videoZoomFactor = switchOver
+        if cam.isSubjectAreaChangeMonitoringEnabled == false {
+            cam.isSubjectAreaChangeMonitoringEnabled = true
+        }
         cam.unlockForConfiguration()
  
         // Máy có ống siêu rộng thì mới có macro (13 Pro lấy nét gần bằng ống này).
@@ -839,6 +856,9 @@ final class CameraManager: NSObject, ObservableObject {
             let switchOver = CGFloat(newCam.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1.0)
             try? newCam.lockForConfiguration()
             newCam.videoZoomFactor = switchOver
+            if newCam.isSubjectAreaChangeMonitoringEnabled == false {
+                newCam.isSubjectAreaChangeMonitoringEnabled = true
+            }
             newCam.unlockForConfiguration()
  
             let newFormat = newCam.activeFormat
@@ -848,6 +868,7 @@ final class CameraManager: NSObject, ObservableObject {
                 self.baseFactor = switchOver
                 self.displayZoom = 1.0
                 self.exposureBias = 0
+                self.lastPushedBias = 0
                 self.isLocked = false
                 self.focusPoint = nil
                 // Camera trước có bộ format riêng — defaultFormat cũ không còn
@@ -906,14 +927,26 @@ final class CameraManager: NSObject, ObservableObject {
     }
  
     // MARK: - Lấy nét & phơi sáng
- 
+
+    /// Bao nhiêu point vuốt dọc thì EV đổi 1 nấc. Bằng đúng quãng đường icon
+    /// mặt trời đi được trên đường ray (xem `FocusIndicatorView`), nên mặt
+    /// trời bám sát đầu ngón tay 1:1 thay vì trôi chậm hơn.
+    static let evDragPointsPerStop: CGFloat = 33
+
     func focus(at devicePoint: CGPoint, uiPoint: CGPoint) {
         guard let device else { return }
         focusPoint = uiPoint
         isLocked = false
- 
+        // Camera gốc trả EV về 0 mỗi lần chạm điểm mới — giữ lại mức cũ sẽ làm
+        // icon mặt trời hiện ra đã lệch sẵn dù người dùng chưa vuốt gì.
+        exposureBias = 0
+        lastPushedBias = 0
+
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
+            if device.isSubjectAreaChangeMonitoringEnabled == false {
+                device.isSubjectAreaChangeMonitoringEnabled = true
+            }
             if device.isFocusPointOfInterestSupported {
                 device.focusPointOfInterest = devicePoint
                 device.focusMode = device.isFocusModeSupported(.autoFocus) ? .autoFocus : .continuousAutoFocus
@@ -922,26 +955,103 @@ final class CameraManager: NSObject, ObservableObject {
                 device.exposurePointOfInterest = devicePoint
                 device.exposureMode = device.isExposureModeSupported(.autoExpose) ? .autoExpose : .continuousAutoExposure
             }
+            device.setExposureTargetBias(0, completionHandler: nil)
             device.unlockForConfiguration()
         }
- 
+
         // Mỗi lần chạm trước đây sinh một Task hẹn 1,5 giây riêng, không ai
         // huỷ ai — chạm lần hai thì hẹn giờ của lần một vẫn chạy và xoá ô vàng
         // sớm. Nay chỉ giữ đúng một hẹn giờ.
+        scheduleFocusHide()
+    }
+
+    /// Giữ ô vàng trên màn hình trong lúc người dùng còn đang vuốt chỉnh EV.
+    func keepFocusAlive() {
+        focusHideTask?.cancel()
+    }
+
+    func scheduleFocusHide(after seconds: Double = 3.5) {
         focusHideTask?.cancel()
         focusHideTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1.5))
+            try? await Task.sleep(for: .seconds(seconds))
             guard let self, !Task.isCancelled, !self.isLocked else { return }
-            self.focusPoint = nil
+            withAnimation(.easeOut(duration: 0.3)) {
+                self.focusPoint = nil
+            }
         }
     }
- 
+
+    // MARK: Vuốt dọc cạnh ô vàng để chỉnh EV
+
+    /// Mức EV lúc đặt ngón tay xuống; nil nghĩa là không có cử chỉ nào đang chạy.
+    private var exposureDragStart: Float?
+
+    func beginExposureDrag() {
+        guard focusPoint != nil else { return }
+        exposureDragStart = exposureBias
+        keepFocusAlive()
+    }
+
+    /// `translationY` là độ dịch dọc của ngón tay tính từ lúc đặt xuống —
+    /// âm là vuốt lên (sáng hơn).
+    func updateExposureDrag(translationY: CGFloat) {
+        guard let start = exposureDragStart else { return }
+        let delta = Float(-translationY / Self.evDragPointsPerStop)
+        // Làm tròn về nấc 0,05 EV: mắt không phân biệt nổi mà số lần đẩy
+        // xuống sessionQueue giảm hẳn.
+        let stepped = (round((start + delta) / 0.05) * 0.05)
+        setExposureBias(stepped)
+        keepFocusAlive()
+    }
+
+    func endExposureDrag() {
+        guard exposureDragStart != nil else { return }
+        exposureDragStart = nil
+        // Đếm giờ ẩn ô vàng chỉ bắt đầu sau khi nhấc ngón tay ra.
+        scheduleFocusHide()
+    }
+
+
+    /// Tự động trả về lấy nét liên tục và ẩn khung vàng khi lia máy sang cảnh mới
+    func subjectAreaDidChange() {
+        guard !isLocked else { return }
+        // Đang vuốt chỉnh EV thì đừng giật ô vàng khỏi tay người dùng.
+        guard exposureDragStart == nil else { return }
+        guard focusPoint != nil || exposureBias != 0 else { return }
+
+        focusHideTask?.cancel()
+        lastPushedBias = 0
+        withAnimation(.easeOut(duration: 0.25)) {
+            focusPoint = nil
+            exposureBias = 0
+        }
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.device else { return }
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            if device.isFocusPointOfInterestSupported {
+                device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isExposurePointOfInterestSupported {
+                device.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5)
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.setExposureTargetBias(0, completionHandler: nil)
+            device.unlockForConfiguration()
+        }
+    }
+
     func lockFocusAndExposure(at devicePoint: CGPoint, uiPoint: CGPoint) {
         guard let device else { return }
         focusHideTask?.cancel()
         focusPoint = uiPoint
         isLocked = true
- 
+
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
             if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = devicePoint }
@@ -951,26 +1061,40 @@ final class CameraManager: NSObject, ObservableObject {
             device.unlockForConfiguration()
         }
     }
- 
+
     func unlock() {
         guard let device else { return }
         focusHideTask?.cancel()
+        exposureDragStart = nil
         isLocked = false
         focusPoint = nil
+        exposureBias = 0
+        lastPushedBias = 0
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
+            if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
             if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+            if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5) }
             if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+            device.setExposureTargetBias(0, completionHandler: nil)
             device.unlockForConfiguration()
         }
     }
  
+    /// Giá trị EV gần nhất đã thực sự đẩy xuống thiết bị. Vuốt liên tục bắn ra
+    /// hàng trăm sự kiện, phần lớn cùng một mức sau khi làm tròn — chặn ở đây
+    /// để không dồn ứ sessionQueue.
+    private var lastPushedBias: Float = 0
+
     func setExposureBias(_ value: Float) {
         guard let device else { return }
-        exposureBias = value
+        let target = min(max(value, -2.0), 2.0)
+        guard target != lastPushedBias else { return }
+        lastPushedBias = target
+        exposureBias = target
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
-            let clamped = min(max(value, device.minExposureTargetBias), device.maxExposureTargetBias)
+            let clamped = min(max(target, device.minExposureTargetBias), device.maxExposureTargetBias)
             device.setExposureTargetBias(clamped, completionHandler: nil)
             device.unlockForConfiguration()
         }
