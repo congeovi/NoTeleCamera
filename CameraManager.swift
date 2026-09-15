@@ -78,6 +78,9 @@ final class CameraManager: NSObject, ObservableObject {
     // Thước thăng bằng
     @Published var rollAngle: Double = 0
     @Published var isLevel = false
+    @Published var orientationAngle: Double = 0
+    /// 1 = hiện rõ, 0 = tắt. Mờ dần khi máy chúc lên/xuống quá nhiều.
+    @Published var levelPitchFade: Double = 1
  
     // Quét mã
     @Published var scannedCode: ScannedCode?
@@ -1417,15 +1420,60 @@ final class CameraManager: NSObject, ObservableObject {
     }
  
     // MARK: - Thước thăng bằng
- 
+
+    /// |gz| bắt đầu làm mờ thước (~44° chúc) và tắt hẳn (~58° chúc).
+    private static let pitchFadeStart = 0.70
+    private static let pitchFadeEnd = 0.85
+    /// Góc lệch để bắt/nhả trạng thái cân bằng (độ).
+    private static let levelThresholdOn = 0.8
+    private static let levelThresholdOff = 2.2
+
     private func startMotion() {
         guard motionManager.isDeviceMotionAvailable, !motionManager.isDeviceMotionActive else { return }
         motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let motion else { return }
-            let roll = motion.attitude.roll * 180 / .pi
-            self.rollAngle = roll
-            self.isLevel = abs(roll) < 1.0 || abs(abs(roll) - 180) < 1.0
+            let gx = motion.gravity.x
+            let gy = motion.gravity.y
+            let gz = motion.gravity.z
+
+            // Máy càng chĩa lên trời hoặc xuống đất thì trọng lực càng dồn về
+            // trục z, góc xoay trong mặt phẳng màn hình càng mất ý nghĩa. Mờ dần
+            // trong dải 44°–58° chúc rồi tắt, thay vì biến mất đột ngột.
+            let tilt = abs(gz)
+            let fade = (Self.pitchFadeEnd - tilt) / (Self.pitchFadeEnd - Self.pitchFadeStart)
+            self.levelPitchFade = min(max(fade, 0), 1)
+
+            guard self.levelPitchFade > 0 else {
+                self.isLevel = false
+                return
+            }
+
+            // Tính góc xoay từ vector trọng lực (trên mặt phẳng màn hình)
+            let angle = atan2(gx, -gy) * 180 / .pi
+            // Tìm mốc thăng bằng gần nhất (0° dọc, ±90° ngang, 180° dọc ngược)
+            var targetAngle = (angle / 90.0).rounded() * 90.0
+            // rounded() sinh ra cả -180 và 180 cho cùng một chiều máy (dọc ngược).
+            // Để nguyên thì rung tay qua biên ±180 sẽ đổi 180 <-> -180 và làm
+            // thước quay trọn một vòng 360°. Chốt về một giá trị duy nhất; phần
+            // bù ±360 bên dưới vẫn đưa delta về đúng dải.
+            if targetAngle <= -180 { targetAngle = 180 }
+            var delta = angle - targetAngle
+            if delta > 180 { delta -= 360 }
+            if delta < -180 { delta += 360 }
+
+            self.rollAngle = delta
+            self.orientationAngle = targetAngle
+
+            // Hysteresis chống rung tay chập chờn khi ở sát ngưỡng cân bằng.
+            // Ngưỡng nhả phải rộng hơn hẳn ngưỡng bắt: tay cầm máy dao động
+            // cỡ ±1–2°, nếu nhả ở 1.2° thì thước vừa ẩn xong lại hiện lại liên
+            // tục thay vì nằm im.
+            if self.isLevel {
+                self.isLevel = abs(delta) < Self.levelThresholdOff
+            } else {
+                self.isLevel = abs(delta) < Self.levelThresholdOn
+            }
         }
     }
  

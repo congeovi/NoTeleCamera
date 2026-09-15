@@ -179,18 +179,133 @@ struct GridOverlay: View {
 struct LevelOverlay: View {
     let roll: Double
     let isLevel: Bool
- 
+    var orientationAngle: Double = 0
+    /// Độ mờ theo độ chúc của máy, do CameraManager tính.
+    var pitchFade: Double = 1
+
+    @State private var isHiddenAfterLevel = false
+    @State private var hideTask: Task<Void, Never>? = nil
+    @State private var hasTriggeredHaptic = false
+    /// Giữ lại một generator đã hâm nóng để cú rung khớp đúng lúc thước đổi
+    /// vàng. Tạo trong onAppear chứ không đặt giá trị mặc định cho @State: struct
+    /// này bị dựng lại 30 lần/giây theo nhịp CoreMotion, mà biểu thức mặc định
+    /// của @State thì chạy theo mỗi lần dựng dù chỉ dùng lần đầu.
+    @State private var haptic: UIImpactFeedbackGenerator?
+
+    // Kích thước thanh cân bằng chuẩn iOS Camera (tổng dài 180pt)
+    private let sideWidth: CGFloat = 36
+    private let centerWidth: CGFloat = 84
+    private let gap: CGFloat = 12
+    private let barHeight: CGFloat = 1.5
+
+    // Mờ dần theo góc lệch thay vì cắt cứng ở một ngưỡng: rõ hoàn toàn tới 12°,
+    // nhạt dần tới hết ở 38°. Không đặt mốc tắt sát 45° vì đúng ở 45° thì mốc
+    // thăng bằng gần nhất đổi sang trục khác, thước sẽ nhảy 90° — để nó tắt
+    // xong trước khi tới đó.
+    private let fadeStartAngle: Double = 12
+    private let fadeEndAngle: Double = 38
+
+    private var totalWidth: CGFloat {
+        (sideWidth * 2) + (gap * 2) + centerWidth
+    }
+
+    /// Mờ dần theo góc lệch. Giá trị này đổi liên tục theo từng khung CoreMotion
+    /// nên tự mượt, không cần (và không được) gắn animation vào.
+    private var angleFade: Double {
+        let deviation = abs(roll)
+        if deviation <= fadeStartAngle { return 1 }
+        if deviation >= fadeEndAngle { return 0 }
+        return 1 - (deviation - fadeStartAngle) / (fadeEndAngle - fadeStartAngle)
+    }
+
+    /// Sắp cân bằng — dùng để hâm nóng haptic trước khi thật sự cần rung.
+    private var isNearLevel: Bool {
+        abs(roll) < 5
+    }
+
     var body: some View {
         ZStack {
-            Rectangle().fill(isLevel ? .yellow : .white.opacity(0.5))
-                .frame(width: 64, height: 1)
-            Rectangle().fill(.white.opacity(0.85))
-                .frame(width: 110, height: 1)
-                .rotationEffect(.degrees(-roll))
-                .opacity(isLevel ? 0 : 1)
+            // Khi chưa cân bằng: 1 thanh gồm 3 đoạn màu trắng
+            // (2 vạch mốc cố định 2 bên + 1 đoạn giữa xoay theo góc chân trời)
+            HStack(spacing: gap) {
+                Capsule()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: sideWidth, height: barHeight)
+
+                Capsule()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: centerWidth, height: barHeight)
+                    .rotationEffect(.degrees(-roll))
+
+                Capsule()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: sideWidth, height: barHeight)
+            }
+            .opacity(isLevel ? 0 : 1)
+
+            // Khi đã cân bằng: Nối liền thành 1 vạch vàng duy nhất dài 180pt
+            Capsule()
+                .fill(Color.yellow)
+                .frame(width: totalWidth, height: barHeight)
+                .opacity(isLevel ? 1 : 0)
         }
-        .animation(.easeOut(duration: 0.1), value: isLevel)
+        .shadow(color: .black.opacity(0.4), radius: 1, x: 0, y: 0.5)
+        .rotationEffect(.degrees(-orientationAngle))
+        // Mờ dần theo góc: liên tục, cố tình không animate.
+        .opacity(angleFade * min(max(pitchFade, 0), 1))
+        // Tự ẩn sau khi cân bằng: animate bằng withAnimation trong
+        // handleLevelChange để hai chiều có thời lượng khác nhau (ẩn chậm,
+        // hiện lại tức thì).
+        .opacity(isHiddenAfterLevel ? 0 : 1)
+        .animation(.easeInOut(duration: 0.3), value: orientationAngle)
+        .animation(.easeOut(duration: 0.15), value: isLevel)
         .allowsHitTesting(false)
+        .onChange(of: isLevel) { _, newValue in
+            handleLevelChange(newValue, allowHaptic: true)
+        }
+        .onChange(of: isNearLevel) { _, near in
+            if near { haptic?.prepare() }
+        }
+        .onAppear {
+            if haptic == nil { haptic = UIImpactFeedbackGenerator(style: .light) }
+            haptic?.prepare()
+            // Lần đầu hiện chỉ dựng đúng trạng thái, không rung: người dùng vừa
+            // bật setting chứ không vừa căn được máy.
+            if isLevel { handleLevelChange(true, allowHaptic: false) }
+        }
+        .onDisappear {
+            hideTask?.cancel()
+            hideTask = nil
+        }
+    }
+
+    private func handleLevelChange(_ leveled: Bool, allowHaptic: Bool) {
+        if leveled {
+            if !hasTriggeredHaptic {
+                if allowHaptic {
+                    haptic?.impactOccurred()
+                    haptic?.prepare()
+                }
+                hasTriggeredHaptic = true
+            }
+            hideTask?.cancel()
+            hideTask = Task {
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    withAnimation(.easeOut(duration: 0.35)) {
+                        isHiddenAfterLevel = true
+                    }
+                }
+            }
+        } else {
+            hideTask?.cancel()
+            hideTask = nil
+            hasTriggeredHaptic = false
+            withAnimation(.easeIn(duration: 0.15)) {
+                isHiddenAfterLevel = false
+            }
+        }
     }
 }
  
@@ -465,7 +580,12 @@ struct ContentView: View {
             }
 
             if cam.settings.gridOn { GridOverlay() }
-            if cam.settings.levelOn { LevelOverlay(roll: cam.rollAngle, isLevel: cam.isLevel) }
+            if cam.settings.levelOn {
+                LevelOverlay(roll: cam.rollAngle,
+                             isLevel: cam.isLevel,
+                             orientationAngle: cam.orientationAngle,
+                             pitchFade: cam.levelPitchFade)
+            }
             if let fp = cam.focusPoint {
                 GeometryReader { geo in
                     FocusIndicatorView(point: fp,

@@ -184,7 +184,7 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] 16:9 và 1:1 cắt canh giữa rồi lưu JPEG 95% — chỉ khi chụp thường,
       vì cắt sẽ phá cặp Live Photo và không áp được cho RAW
 - [x] Lưới 3×3 bật/tắt
-- [x] Thước thăng bằng dùng CoreMotion, vạch chuyển vàng khi máy cân bằng
+- [x] Thước thăng bằng chuẩn iOS 17 (1 thanh 3 đoạn, dài 180pt, chuyển vàng và tự ẩn sau khi cân bằng)
 ## 18. Camera trước
  
 - [x] Nút đổi camera trước/sau
