@@ -239,6 +239,17 @@ struct ContentView: View {
     @State private var shutterFlashOpacity: Double = 0
     @State private var previewUIView: PreviewUIView?
     @State private var modeFreezeFrame: UIImage?
+    /// Bán kính mờ đang áp lên ảnh đóng băng khi chuyển chế độ: mờ dần vào
+    /// ngay khi bấm mode, giữ đến khi camera sẵn sàng rồi tan về 0.
+    @State private var switchBlur: CGFloat = 0
+    /// Độ đục của ảnh đóng băng — rượt về 0 cùng lúc blur tan để chuyển mượt
+    /// sang khung sống bên dưới.
+    @State private var freezeOpacity: Double = 1
+    /// Mốc thời gian bắt đầu chuyển, để giữ mờ tối thiểu một nhịp.
+    @State private var modeSwitchStartedAt: Date?
+    /// Số thứ tự của lần chuyển hiện tại — các hẹn giờ muộn của lần cũ phải
+    /// đối chiếu số này trước khi đụng vào trạng thái của lần mới.
+    @State private var modeSwitchGeneration = 0
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
  
@@ -333,15 +344,22 @@ struct ContentView: View {
                         pinchStart = cam.displayZoom
                     }
             )
+            // Không chụp được snapshot (preview chưa có kích thước) thì làm
+            // mờ thẳng khung sống — vẫn đúng ý "mờ đến khi camera sẵn sàng".
+            .blur(radius: (modeFreezeFrame == nil && cam.isModeTransitioning) ? 16 : 0)
+            .animation(.easeIn(duration: 0.15), value: cam.isModeTransitioning)
  
             // Ảnh đóng băng phủ lên trong lúc applyMode cấu hình lại session
             // (đổi mode ảnh/video/chân dung...). Che đúng lúc AVFoundation
             // renegotiate preset/format nên người dùng thấy chuyển mượt thay
-            // vì thấy khung hình nháy/đen.
+            // vì thấy khung hình nháy/đen. Lớp blur nói cho mắt biết "đang
+            // chuyển" và chỉ tan khi CameraManager báo đã sẵn sàng.
             if let modeFreezeFrame {
                 Image(uiImage: modeFreezeFrame)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                    .blur(radius: switchBlur)
+                    .opacity(freezeOpacity)
                     .allowsHitTesting(false)
                     .transition(.identity)
             }
@@ -367,17 +385,57 @@ struct ContentView: View {
             shutterFlashOpacity = 0.9
             withAnimation(.easeOut(duration: 0.25)) { shutterFlashOpacity = 0 }
         }
+        // CameraManager báo đã cấu hình xong: giữ mờ thêm một nhịp tối thiểu
+        // (tránh nhấp nháy khi sẵn sàng gần như tức thì) rồi cho hiệu ứng tan.
+        .onChange(of: cam.isModeTransitioning) { _, transitioning in
+            guard !transitioning, modeFreezeFrame != nil else { return }
+            let gen = modeSwitchGeneration
+            let elapsed = Date().timeIntervalSince(modeSwitchStartedAt ?? Date())
+            let delay = max(0, 0.25 - elapsed)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard modeSwitchGeneration == gen, modeFreezeFrame != nil else { return }
+                unwindModeFreeze()
+            }
+        }
     }
  
-    /// Chụp khung hình cuối cùng trước khi đổi mode và giữ nó phủ lên preview
-    /// một nhịp. applyMode đổi sessionPreset/activeFormat trên một session
-    /// đang chạy nên AVFoundation luôn rớt/đóng băng một khung hình thật lúc
-    /// renegotiate — che bằng ảnh tĩnh này để mắt không thấy nháy.
+    /// Chụp khung hình cuối cùng trước khi đổi mode và giữ nó phủ lên preview.
+    /// Bắt đầu hiệu ứng chuyển chế độ: chốt khung hình cuối làm nền và mờ dần
+    /// vào ngay khi bấm mode. Ảnh đóng băng che đúng lúc AVFoundation
+    /// renegotiate preset/format; lớp mờ chỉ tan khi CameraManager báo camera
+    /// đã sẵn sàng (xem onChange của isModeTransitioning).
     private func freezePreviewForModeSwitch() {
         guard let image = previewUIView?.snapshotImage() else { return }
+        modeSwitchGeneration += 1
+        let gen = modeSwitchGeneration
+        modeSwitchStartedAt = Date()
+        freezeOpacity = 1
+        switchBlur = 0
         modeFreezeFrame = image
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            withAnimation(.easeOut(duration: 0.15)) { modeFreezeFrame = nil }
+        withAnimation(.easeIn(duration: 0.15)) { switchBlur = 16 }
+        // Lưới an toàn thứ hai của UI: nếu cả tín hiệu sẵn sàng lẫn watchdog
+        // của CameraManager đều mất, vẫn phải tan mờ.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            guard modeSwitchGeneration == gen, modeFreezeFrame != nil else { return }
+            unwindModeFreeze()
+        }
+    }
+
+    /// Tan mờ: blur về 0 đồng thời rượt độ đục về 0 (khung sống bên dưới đã
+    /// sẵn sàng và đang hiển thị), xong mới gỡ ảnh đóng băng. Chỉ lần chuyển
+    /// mới nhất mới được gỡ — lần cũ bấm muộn hơn thì bỏ qua.
+    private func unwindModeFreeze() {
+        guard modeFreezeFrame != nil else { return }
+        let gen = modeSwitchGeneration
+        withAnimation(.easeOut(duration: 0.25)) {
+            switchBlur = 0
+            freezeOpacity = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+            guard modeSwitchGeneration == gen else { return }
+            modeFreezeFrame = nil
+            freezeOpacity = 1
+            switchBlur = 0
         }
     }
 
@@ -468,6 +526,13 @@ struct ContentView: View {
  
     private var livePhotoButton: some View {
         Button {
+            // reconfigure() cũng renegotiate session (tráo Live Photo ↔ movie
+            // output) như setMode, nên cần cùng cơ chế freeze+mờ — không thì
+            // rơi vào nhánh fallback (mờ thẳng khung sống, không có mờ tối
+            // thiểu) và có thể thấy chớp mờ nhanh thay vì mượt.
+            if !cam.isRecording, !cam.isProcessing {
+                freezePreviewForModeSwitch()
+            }
             cam.settings.livePhotoOn.toggle()
             cam.settings.save()
             // Bật/tắt Live Photo phải tráo output (Live Photo và movie output

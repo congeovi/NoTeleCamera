@@ -92,6 +92,23 @@ final class CameraManager: NSObject, ObservableObject {
     /// độ Ảnh thì QuickTake không dùng được — UI cần biết để không hiểu nhầm.
     @Published var quickTakeAvailable = true
  
+    // MARK: Chuyển chế độ
+
+    /// Session đang được tái cấu hình sau khi đổi chế độ (applyMode) — từ lúc
+    /// gọi cho đến khi commitConfiguration, reset zoom và gắn/gỡ mic xong hết.
+    /// UI dựa vào cờ này để giữ hiệu ứng mờ trên preview cho đến khi camera
+    /// thật sự sẵn sàng chụp/quay, rồi mới cho lớp mờ tan ra.
+    @Published var isModeTransitioning = false
+
+    /// Số thứ tự của lần chuyển chế độ đang chạy. Người dùng có thể bấm mode
+    /// kế tiếp trong lúc lần trước chưa xong — completion của lần cũ không
+    /// được nhả cờ của lần mới.
+    private var modeTransitionGeneration = 0
+
+    /// Watchdog: nếu completion vì lý do nào đó không chạy (session bị gián
+    /// đoạn, lỗi...), cờ phải tự nhả sau hạn này để preview không kẹt mờ.
+    private var modeTransitionWatchdog: Task<Void, Never>?
+ 
     // MARK: Thành phần AVFoundation
  
     nonisolated let session = AVCaptureSession()
@@ -478,14 +495,21 @@ final class CameraManager: NSObject, ObservableObject {
     /// hình session lúc đang chạy làm luồng hình khựng một nhịp và mic cần
     /// vài trăm mili giây mới ổn định — đó là lý do đoạn đầu video hay mất
     /// tiếng hoặc giật.
-    private func attachAudioIfNeeded() {
-        guard !audioAttached else { return }
+    ///
+    /// `onDone` được gọi trên main actor khi mọi thứ đã xong (kể cả trường
+    /// hợp không có gì phải gắn) — applyMode dùng nó để biết chính xác lúc
+    /// nào camera sẵn sàng hoàn toàn.
+    private func attachAudioIfNeeded(onDone: (() -> Void)? = nil) {
+        guard !audioAttached else { Task { @MainActor in onDone?() } ; return }
         audioAttached = true
         sessionQueue.async { [weak self] in
             guard let self else { return }
             Self.setAudioSession(recording: true)
             guard let mic = AVCaptureDevice.default(for: .audio),
-                  let input = try? AVCaptureDeviceInput(device: mic) else { return }
+                  let input = try? AVCaptureDeviceInput(device: mic) else {
+                Task { @MainActor in onDone?() }
+                return
+            }
             self.session.beginConfiguration()
             if self.session.canAddInput(input) {
                 self.session.addInput(input)
@@ -499,14 +523,18 @@ final class CameraManager: NSObject, ObservableObject {
                 #endif
             }
             self.session.commitConfiguration()
+            Task { @MainActor in onDone?() }
         }
     }
  
     /// Gỡ mọi input âm thanh đang có trong session. Lấy session làm nguồn sự
     /// thật thay vì giữ tham chiếu riêng, và vì hai hàm này cùng chạy trên
     /// sessionQueue nối tiếp nên thứ tự gắn-rồi-gỡ luôn đúng.
-    func detachAudio() {
-        guard audioAttached else { return }
+    ///
+    /// `onDone` được gọi trên main actor khi mọi thứ đã xong (kể cả trường
+    /// hợp không có gì phải gỡ).
+    func detachAudio(onDone: (() -> Void)? = nil) {
+        guard audioAttached else { Task { @MainActor in onDone?() } ; return }
         audioAttached = false
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -518,6 +546,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
             self.session.commitConfiguration()
             Self.setAudioSession(recording: false)
+            Task { @MainActor in onDone?() }
         }
     }
  
@@ -544,6 +573,10 @@ final class CameraManager: NSObject, ObservableObject {
         // Bản cũ dùng MainActor.assumeIsolated bên trong sessionQueue, mà
         // assumeIsolated trap khi không thực sự ở main actor → crash.
         guard let dev = device else { return }
+
+        // Đánh dấu bắt đầu một lần chuyển chế độ: UI mở hiệu ứng mờ trên
+        // preview và giữ cho đến khi completion của CHÍNH lần này chạy xong.
+        let transitionGen = beginModeTransition()
  
         let quality = settings.videoQuality
         let slomo = settings.slomoRate
@@ -663,14 +696,48 @@ final class CameraManager: NSObject, ObservableObject {
                 self.applyMacroIfNeeded()
                 self.displayZoom = 1.0
                 if wantsMic {
-                    self.attachAudioIfNeeded()
+                    self.attachAudioIfNeeded {
+                        self.finishModeTransition(generation: transitionGen)
+                    }
                 } else if !self.isRecording {
-                    self.detachAudio()
+                    self.detachAudio {
+                        self.finishModeTransition(generation: transitionGen)
+                    }
+                } else {
+                    self.finishModeTransition(generation: transitionGen)
                 }
             }
         }
     }
  
+    // MARK: Hiệu ứng chuyển chế độ
+
+    /// Bắt đầu một lần chuyển chế độ: bật cờ mờ cho UI và hẹn watchdog nhả cờ
+    /// đề phòng completion bị mất (session bị gián đoạn, lỗi...). Trả về số
+    /// thứ tự của lần này để completion đối chiếu khi gọi finishModeTransition.
+    private func beginModeTransition() -> Int {
+        modeTransitionGeneration += 1
+        let gen = modeTransitionGeneration
+        isModeTransitioning = true
+        modeTransitionWatchdog?.cancel()
+        modeTransitionWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            self.finishModeTransition(generation: gen)
+        }
+        return gen
+    }
+
+    /// Nhả cờ chuyển chế độ — chỉ lần chuyển MỚI NHẤT mới có quyền nhả, để
+    /// người dùng bấm mode kế tiếp trong lúc lần trước chưa xong không bị lần
+    /// cũ làm tắt hiệu ứng sớm.
+    private func finishModeTransition(generation: Int) {
+        guard generation == modeTransitionGeneration else { return }
+        modeTransitionWatchdog?.cancel()
+        modeTransitionWatchdog = nil
+        isModeTransitioning = false
+    }
+
     /// Tìm format hỗ trợ tốc độ cao, ưu tiên độ phân giải lớn nhất ở mức fps đó.
     private static func highFrameRateFormat(for dev: AVCaptureDevice, fps: Double) -> AVCaptureDevice.Format? {
         dev.formats
