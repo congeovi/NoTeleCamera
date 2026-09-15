@@ -40,10 +40,13 @@ Thêm vào Info.plist, thiếu là app crash:
 - [x] Khoá cứng ở `builtInDualWideCamera` — chỉ gồm ống siêu rộng và ống chính
 - [x] Ống tele 77mm không nằm trong thiết bị ảo, nên không thể bị kích hoạt
 - [x] Tự rơi về `builtInWideAngleCamera` nếu máy không có cụm dual wide
+- [x] Ngoại lệ duy nhất: chế độ quay chậm dùng `builtInWideAngleCamera` — đó là
+      ống chính 1×, vẫn không phải tele, xem §14
 - [x] Bảng chọn zoom không có mốc 3× — không có đường nào gọi tới tele
 - [x] Trần zoom số đặt ở 5× để tránh ảnh nát
 - [x] Camera trước dùng ống góc rộng đơn (vốn không có tele)
-- [x] Bảng chọn zoom: 0,5× / 1× / 2× (sau), 1× / 2× (chân dung), 1× (trước)
+- [x] Bảng chọn zoom: 0,5× / 1× / 2× (sau), 1× / 2× (chân dung và quay chậm),
+      1× (trước)
 ## 2. Zoom
  
 - [x] Nút chọn nhanh, nút đang chọn phóng to và chuyển màu vàng
@@ -151,15 +154,37 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Nút chụp đổi hình dạng để phân biệt QuickTake với quay thường
 - [x] Tự vô hiệu khi Live Photo đang bật, kèm câu giải thích trong cài đặt
 ## 14. Quay chậm
- 
-- [x] Hai mức: 120fps / 240fps
+
+- [x] Hai mức: 120 fps / 240 fps, có nút chuyển nhanh trên thanh trên và mục
+      chọn trong Cài đặt
+- [x] Tự tráo sang ống chính 1× (`builtInWideAngleCamera`) vì thiết bị ảo kép
+      (`builtInDualWideCamera`) không khai báo format tốc độ cao — vẫn là ống
+      1×, hoàn toàn không đụng tới tele
+- [x] Tráo ngược lại về thiết bị kép khi thoát chế độ, để lấy lại góc siêu rộng
+      0,5× và macro
 - [x] Tự tìm format tốc độ cao, ưu tiên độ phân giải lớn nhất ở mức fps đó
+- [x] Tự hạ 240 fps xuống 120 fps khi camera hiện tại không đạt (thường là camera
+      trước) và báo nhẹ cho người dùng — chỉ hạ cho lần chạy này, mức đã lưu
+      trong Cài đặt giữ nguyên nên lật về camera sau là 240 fps trở lại
+- [x] Kẹp fps theo dải thật của format trước khi gán `activeVideoMinFrameDuration`
+      — gán ra ngoài dải là AVFoundation ném exception chứ không trả lỗi
+- [x] Máy không có format nào từ 120 fps trở lên thì chặn luôn nút quay, không
+      để clip tốc độ thường bị kéo giãn thành video giật
+- [x] Mốc zoom ở chế độ quay chậm quy về 1× / 2× (không có 0,5× vì đang chạy
+      ống 1×)
 - [x] `sessionPreset = .inputPriority` để giữ được `activeFormat` đã chọn
 - [x] Sau khi quay xong kéo giãn trục thời gian bằng `scaleTimeRange`
       rồi xuất lại — nếu không video sẽ phát ở tốc độ thường
+- [x] Hệ số kéo giãn lấy theo fps THẬT đã quay, không theo mức đã chọn, để clip
+      quay ở mức bị hạ không ra sai tốc độ gấp đôi
 - [x] Bỏ âm thanh (tiếng kéo chậm 8 lần chỉ còn là tiếng rền)
 - [x] Lớp phủ "Đang xuất video…" trong lúc xử lý
-- [x] Khôi phục format gốc khi thoát chế độ
+- [x] Khôi phục format gốc khi thoát chế độ (chỉ cần cho camera trước — camera
+      sau đổi hẳn device nên `activeFormat` của thiết bị kép không bị bẩn)
+- [x] Đèn pin, EV và khoá AE/AF được đặt lại sau khi tráo device, vì các trạng
+      thái đó gắn với từng `AVCaptureDevice`
+- [x] Các cờ năng lực Live Photo / depth / ProRAW KHÔNG đọc lại lúc tráo device:
+      `movieOutput` đang nằm trong session sẽ che mất chúng
 ## 15. Tua nhanh (time-lapse)
  
 - [x] Ba nhịp: 0,5s / 1s / 3s

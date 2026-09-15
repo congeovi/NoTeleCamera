@@ -58,7 +58,17 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var isFront = false
     @Published var errorMessage: String?
     @Published var statusMessage: String?
- 
+
+    /// fps thực sự đang được cấu hình trên camera ở chế độ quay chậm, `nil`
+    /// nếu camera hiện tại không quay chậm được.
+    ///
+    /// Tách khỏi `settings.slomoRate` vì hai thứ khác nhau: `slomoRate` là mức
+    /// người dùng CHỌN và được lưu lại, còn đây là mức máy CHẤP NHẬN. Camera
+    /// trước thường chỉ đạt 120fps; nếu hạ luôn `slomoRate` rồi `save()` thì
+    /// lật về camera sau vẫn kẹt 120fps dù ống đó chạy được 240fps.
+    /// Hệ số kéo giãn thời gian lúc xuất video phải lấy theo giá trị này.
+    @Published private(set) var activeSlomoFps: Double?
+
     /// Góc xoay áp cho ảnh và video, lấy từ RotationCoordinator.
     /// Ép cứng 90° như bản cũ làm ảnh chụp ngang bị gắn hướng dọc.
     @Published var captureRotationAngle: CGFloat = 90
@@ -392,6 +402,29 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Chọn camera phù hợp chế độ
+
+    /// Chọn camera phù hợp cho từng chế độ:
+    /// - Camera trước luôn là .builtInWideAngleCamera.
+    /// - Camera sau ở chế độ quay chậm (Slo-mo) PHẢI dùng .builtInWideAngleCamera
+    ///   vì camera ảo .builtInDualWideCamera không hỗ trợ các định dạng tốc độ cao
+    ///   (120/240 fps). Ống 1x này hoàn toàn không cấp điện cho ống tele, đúng tôn chỉ NoTele.
+    /// - Camera sau ở các chế độ khác ưu tiên .builtInDualWideCamera để dùng được 0.5x
+    ///   siêu rộng và macro mà vẫn chặn triệt để ống tele.
+    ///
+    /// `nonisolated` vì `configureSession` chạy ngoài main actor và mọi nhánh
+    /// gọi còn lại đều nằm trong khối `sessionQueue.async`.
+    nonisolated static func bestDevice(for mode: CaptureMode, isFront: Bool) -> AVCaptureDevice? {
+        if isFront {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+        }
+        if mode == .slomo {
+            return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+        }
+        return AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+    }
+
     // MARK: - Dựng session
  
     private nonisolated func configureSession(startMode: CaptureMode, startLivePhotoOn: Bool) {
@@ -402,8 +435,8 @@ final class CameraManager: NSObject, ObservableObject {
         // builtInDualWideCamera = [ống siêu rộng 0.5x + ống chính 1x].
         // Thiết bị ảo này KHÔNG chứa ống tele, nên OIS tele không bao giờ
         // được cấp điện — đây là lý do tồn tại của cả app.
-        let cam = AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
-            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+        // Riêng chế độ quay chậm cần camera vật lý builtInWideAngleCamera để có 120/240fps.
+        let cam = Self.bestDevice(for: startMode, isFront: false)
  
         guard let cam,
               let input = try? AVCaptureDeviceInput(device: cam),
@@ -600,6 +633,11 @@ final class CameraManager: NSObject, ObservableObject {
  
         let quality = settings.videoQuality
         let slomo = settings.slomoRate
+        // isFront cũng phải chốt ở đây. Đọc self.isFront bên trong
+        // sessionQueue là đọc state của main actor từ luồng nền — trình biên
+        // dịch không chặn vì closure của DispatchQueue.async thừa kế isolation
+        // một cách tĩnh, nhưng nó vẫn chạy ngoài main actor.
+        let front = isFront
         let wantsDepth = (mode == .portrait) && supportsDepth
         let wantsLive = (mode == .photo) && settings.livePhotoOn && supportsLivePhoto
         let defFormat = defaultFormat
@@ -607,33 +645,86 @@ final class CameraManager: NSObject, ObservableObject {
         let wantsMic = (mode == .video || mode == .slomo)
  
         quickTakeAvailable = !wantsLive
+        // Rời quay chậm thì mức fps đã đo được không còn ý nghĩa.
+        if mode != .slomo { activeSlomoFps = nil }
  
         sessionQueue.async { [weak self] in
             guard let self else { return }
- 
+
+            // Input video đang thực sự nằm trong session, hỏi thẳng session
+            // chứ không đọc self.videoInput: thuộc tính đó chỉ được gán trong
+            // Task @MainActor ở cuối hàm, không đồng bộ với sessionQueue. Bấm
+            // hai chế độ liên tiếp là lần chạy sau đọc trúng input cũ →
+            // removeInput một input không còn trong session rồi addInput
+            // device thứ hai → session có hai video input và hỏng cấu hình.
+            let currentInput = self.session.inputs
+                .compactMap { $0 as? AVCaptureDeviceInput }
+                .first { $0.device.hasMediaType(.video) }
+
+            var activeDev = currentInput?.device ?? dev
+            var swappedInput: AVCaptureDeviceInput?
+
             self.session.beginConfiguration()
- 
+
+            // Đổi camera nếu chế độ yêu cầu (ví dụ: quay chậm cần camera vật lý góc rộng 1x
+            // thay vì camera ảo dual wide).
+            if let targetDev = Self.bestDevice(for: mode, isFront: front),
+               targetDev.uniqueID != activeDev.uniqueID,
+               let newInput = try? AVCaptureDeviceInput(device: targetDev) {
+                if let currentInput { self.session.removeInput(currentInput) }
+                if self.session.canAddInput(newInput) {
+                    self.session.addInput(newInput)
+                    activeDev = targetDev
+                    swappedInput = newInput
+                } else if let currentInput {
+                    self.session.addInput(currentInput)
+                }
+            }
+
             switch mode {
             case .slomo:
                 // Quay chậm cần chọn activeFormat riêng → preset phải là inputPriority.
-                if let fmt = Self.highFrameRateFormat(for: dev, fps: slomo.fps) {
+                if let (fmt, actualFps) = Self.bestHighFrameRateFormat(for: activeDev, preferredFps: slomo.fps) {
                     self.session.sessionPreset = .inputPriority
-                    try? dev.lockForConfiguration()
-                    dev.activeFormat = fmt
-                    let d = CMTime(value: 1, timescale: CMTimeScale(slomo.fps))
-                    dev.activeVideoMinFrameDuration = d
-                    dev.activeVideoMaxFrameDuration = d
-                    dev.unlockForConfiguration()
+                    try? activeDev.lockForConfiguration()
+                    activeDev.activeFormat = fmt
+                    let d = CMTime(value: 1, timescale: CMTimeScale(actualFps))
+                    activeDev.activeVideoMinFrameDuration = d
+                    activeDev.activeVideoMaxFrameDuration = d
+                    activeDev.unlockForConfiguration()
+
+                    Task { @MainActor in
+                        self.activeSlomoFps = actualFps
+                        // Chỉ báo cho người dùng biết máy đang chạy mức thấp
+                        // hơn mức đã chọn. KHÔNG sửa và lưu settings.slomoRate:
+                        // camera trước chỉ 120fps, hạ luôn mức đã lưu thì lật
+                        // về camera sau vẫn kẹt 120fps.
+                        // So sánh có dung sai: phần cứng hay khai 239,76 fps
+                        // cho mức 240, đó không phải là bị hạ mức.
+                        if slomo.fps - actualFps > 1.0 {
+                            self.statusMessage = "Camera này chỉ quay chậm được ở mức \(Int(actualFps.rounded())) fps."
+                        }
+                    }
                 } else {
-                    Task { @MainActor in self.errorMessage = "Máy không hỗ trợ mức quay chậm này." }
+                    Task { @MainActor in
+                        self.activeSlomoFps = nil
+                        self.errorMessage = "Camera này không hỗ trợ quay chậm (yêu cầu tối thiểu 120 fps)."
+                    }
                 }
- 
+
             case .video, .timelapse:
                 // Khôi phục format gốc nếu vừa thoát quay chậm.
-                if let defFormat, dev.activeFormat != defFormat {
-                    try? dev.lockForConfiguration()
-                    dev.activeFormat = defFormat
-                    dev.unlockForConfiguration()
+                //
+                // Điều kiện formats.contains không thừa: quay chậm ở camera
+                // SAU chạy trên builtInWideAngleCamera, còn defaultFormat là
+                // format của builtInDualWideCamera — ép format của device này
+                // sang device kia là AVFoundation ném exception. Nhánh này
+                // thực chất chỉ còn cần cho camera TRƯỚC, nơi cả hai chế độ
+                // dùng chung một device nên activeFormat thật sự bị bẩn.
+                if let defFormat, activeDev.formats.contains(defFormat), activeDev.activeFormat != defFormat {
+                    try? activeDev.lockForConfiguration()
+                    activeDev.activeFormat = defFormat
+                    activeDev.unlockForConfiguration()
                 }
                 let preset = (mode == .video) ? quality.preset : AVCaptureSession.Preset.hd1920x1080
                 // Gán lại preset dù giá trị không đổi (vd. video→timelapse
@@ -642,13 +733,13 @@ final class CameraManager: NSObject, ObservableObject {
                 if self.session.sessionPreset != preset, self.session.canSetSessionPreset(preset) {
                     self.session.sessionPreset = preset
                 }
-                if mode == .video { Self.applyFrameRate(quality.fps, to: dev) }
+                if mode == .video { Self.applyFrameRate(quality.fps, to: activeDev) }
 
             case .photo, .portrait:
-                if let defFormat, dev.activeFormat != defFormat {
-                    try? dev.lockForConfiguration()
-                    dev.activeFormat = defFormat
-                    dev.unlockForConfiguration()
+                if let defFormat, activeDev.formats.contains(defFormat), activeDev.activeFormat != defFormat {
+                    try? activeDev.lockForConfiguration()
+                    activeDev.activeFormat = defFormat
+                    activeDev.unlockForConfiguration()
                 }
                 // Photo↔portrait giữ nguyên preset .photo — tránh gán lại để
                 // khỏi renegotiate không cần thiết.
@@ -691,7 +782,7 @@ final class CameraManager: NSObject, ObservableObject {
  
             // activeFormat có thể vừa đổi (quay chậm ↔ thường) nên kích thước
             // ảnh tối đa phải đọc lại, nếu không chụp ở format mới sẽ lỗi.
-            if let maxDim = dev.activeFormat.supportedMaxPhotoDimensions.last {
+            if let maxDim = activeDev.activeFormat.supportedMaxPhotoDimensions.last {
                 self.photoOutput.maxPhotoDimensions = maxDim
             }
 
@@ -706,12 +797,45 @@ final class CameraManager: NSObject, ObservableObject {
             // activeFormat và tự ý đặt lại videoZoomFactor (thường về mức
             // 0,5x của ống siêu rộng). Ép lại về mốc 1x ngay tại đây để zoom
             // hiển thị luôn về 1.0 sau khi chuyển chế độ, không kẹt ở 0.5.
-            let switchOver = CGFloat(dev.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1.0)
-            try? dev.lockForConfiguration()
-            dev.videoZoomFactor = switchOver
-            dev.unlockForConfiguration()
+            let switchOver = CGFloat(activeDev.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1.0)
+            try? activeDev.lockForConfiguration()
+            activeDev.videoZoomFactor = switchOver
+            if activeDev.isSubjectAreaChangeMonitoringEnabled == false {
+                activeDev.isSubjectAreaChangeMonitoringEnabled = true
+            }
+            activeDev.unlockForConfiguration()
 
             Task { @MainActor in
+                if let swappedInput {
+                    self.videoInput = swappedInput
+                    self.startRotationCoordinator(for: activeDev)
+                    // Chỉ macro phụ thuộc device cụ thể: ống 1x đơn không có
+                    // ống siêu rộng nên không macro được.
+                    //
+                    // KHÔNG đọc lại supportsLivePhoto / supportsDepth /
+                    // supportsProRAW ở đây. Lúc này movieOutput đã nằm trong
+                    // session và nó che mất isLivePhotoCaptureSupported cùng
+                    // isDepthDataDeliverySupported (xem configureSession và
+                    // flipCamera — cả hai đều gỡ movieOutput ra trước khi đọc).
+                    // Đọc ở đây là nhận false, khiến nút Live Photo biến mất
+                    // và chế độ Chân dung mất depth vĩnh viễn sau một vòng
+                    // vào/ra quay chậm. Ba cờ này là năng lực của VỊ TRÍ
+                    // camera, chỉ đổi khi lật trước/sau — flipCamera đã lo.
+                    self.supportsMacro = activeDev.constituentDevices.contains {
+                        $0.deviceType == .builtInUltraWideCamera
+                    }
+                    // Đổi device là mọi trạng thái gắn với device cũ hết hiệu
+                    // lực: torchMode là thuộc tính của từng AVCaptureDevice nên
+                    // device mới luôn khởi đầu ở .off, còn EV/khoá AE-AF thì
+                    // thuộc về ống kính cũ.
+                    self.exposureBias = 0
+                    self.lastPushedBias = 0
+                    self.isLocked = false
+                    self.focusPoint = nil
+                    if self.torchOn {
+                        if activeDev.hasTorch { self.setTorch(true) } else { self.torchOn = false }
+                    }
+                }
                 self.baseFactor = switchOver
                 self.applyMacroIfNeeded()
                 self.displayZoom = 1.0
@@ -759,10 +883,12 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     /// Tìm format hỗ trợ tốc độ cao, ưu tiên độ phân giải lớn nhất ở mức fps đó.
-    private static func highFrameRateFormat(for dev: AVCaptureDevice, fps: Double) -> AVCaptureDevice.Format? {
+    private nonisolated static func highFrameRateFormat(for dev: AVCaptureDevice, fps: Double) -> AVCaptureDevice.Format? {
         dev.formats
             .filter { fmt in
-                fmt.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= fps }
+                fmt.videoSupportedFrameRateRanges.contains {
+                    $0.minFrameRate <= fps && $0.maxFrameRate >= (fps - 1.0)
+                }
             }
             .max { a, b in
                 let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
@@ -770,8 +896,32 @@ final class CameraManager: NSObject, ObservableObject {
                 return Int(da.width) * Int(da.height) < Int(db.width) * Int(db.height)
             }
     }
+
+    /// fps cao nhất mà format thực sự chạy được, nhưng không vượt mức yêu cầu.
+    ///
+    /// `highFrameRateFormat` nhận cả format có `maxFrameRate` thấp hơn mức yêu
+    /// cầu một chút (239,xx cho yêu cầu 240) vì phần cứng hay khai báo lẻ.
+    /// Nhưng `activeVideoMinFrameDuration` thì KHÔNG khoan dung: gán giá trị
+    /// nằm ngoài dải của activeFormat là AVFoundation ném NSInvalidArgumentException
+    /// chứ không trả lỗi — tức là crash. Nên phải kẹp lại theo dải thật.
+    private nonisolated static func achievableFps(_ fmt: AVCaptureDevice.Format, requested: Double) -> Double {
+        let maxReal = fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? requested
+        return min(requested, maxReal)
+    }
+
+    /// Tìm format tốc độ cao tốt nhất cho thiết bị, tự động hạ từ 240fps xuống
+    /// 120fps nếu thiết bị chỉ hỗ trợ 120fps.
+    private nonisolated static func bestHighFrameRateFormat(for dev: AVCaptureDevice, preferredFps: Double) -> (format: AVCaptureDevice.Format, actualFps: Double)? {
+        if let fmt = highFrameRateFormat(for: dev, fps: preferredFps) {
+            return (fmt, achievableFps(fmt, requested: preferredFps))
+        }
+        if preferredFps > 120, let fmt = highFrameRateFormat(for: dev, fps: 120) {
+            return (fmt, achievableFps(fmt, requested: 120))
+        }
+        return nil
+    }
  
-    private static func applyFrameRate(_ fps: Double, to dev: AVCaptureDevice) {
+    private nonisolated static func applyFrameRate(_ fps: Double, to dev: AVCaptureDevice) {
         guard (try? dev.lockForConfiguration()) != nil else { return }
         let ok = dev.activeFormat.videoSupportedFrameRateRanges.contains {
             fps >= $0.minFrameRate && fps <= $0.maxFrameRate
@@ -819,10 +969,7 @@ final class CameraManager: NSObject, ObservableObject {
  
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            let newCam: AVCaptureDevice? = goingFront
-                ? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-                : (AVCaptureDevice.default(.builtInDualWideCamera, for: .video, position: .back)
-                   ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back))
+            let newCam = Self.bestDevice(for: self.settings.mode, isFront: goingFront)
  
             guard let newCam, let newInput = try? AVCaptureDeviceInput(device: newCam) else { return }
  
@@ -925,7 +1072,7 @@ final class CameraManager: NSObject, ObservableObject {
     /// Các mốc zoom. Không bao giờ có 3× — đó là ống tele.
     var zoomStops: [CGFloat] {
         if isFront { return [1.0] }
-        if settings.mode == .portrait { return [1.0, 2.0] }
+        if settings.mode == .portrait || settings.mode == .slomo { return [1.0, 2.0] }
         return [0.5, 1.0, 2.0]
     }
 
@@ -1253,6 +1400,13 @@ final class CameraManager: NSObject, ObservableObject {
             errorMessage = "Chưa sẵn sàng quay. Tắt Live Photo rồi thử lại."
             return
         }
+
+        // Không chặn ở đây thì clip quay ở tốc độ thường vẫn bị kéo giãn 8×
+        // lúc xuất, ra một video giật chứ không phải quay chậm.
+        guard settings.mode != .slomo || activeSlomoFps != nil else {
+            errorMessage = "Camera này không hỗ trợ quay chậm (yêu cầu tối thiểu 120 fps)."
+            return
+        }
  
         // Ở chế độ quay, mic đã được gắn từ lúc vào chế độ. Chỉ QuickTake
         // (chế độ Ảnh) mới phải gắn tại chỗ.
@@ -1530,7 +1684,10 @@ extension CameraManager: AVCaptureFileOutputRecordingDelegate {
             // video sẽ phát ở tốc độ thường.
             if self.settings.mode == .slomo {
                 self.isProcessing = true
-                let factor = self.settings.slomoRate.slowdown
+                // Lấy theo fps THẬT đang chạy, không theo mức người dùng
+                // chọn: camera trước có thể đã bị hạ xuống 120fps.
+                let fps = self.activeSlomoFps ?? self.settings.slomoRate.fps
+                let factor = SlomoRate.slowdown(forCapturedFps: fps)
                 Task {
                     do {
                         let slowed = try await MediaProcessing.slowDown(url: outputFileURL, factor: factor)

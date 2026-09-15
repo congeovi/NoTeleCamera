@@ -718,6 +718,8 @@ struct ContentView: View {
                 timerButton
                 if cam.supportsLivePhoto && cam.settings.mode == .photo { livePhotoButton }
                 if cam.supportsMacro && !cam.isFront && cam.settings.mode == .photo { macroButton }
+            } else if cam.settings.mode == .slomo && !cam.isRecording {
+                slomoRateButton
             }
  
             Spacer()
@@ -804,6 +806,25 @@ struct ContentView: View {
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(cam.settings.macroOn ? .yellow : .white)
                 .frame(width: 40, height: 44)
+        }
+    }
+
+    private var slomoRateButton: some View {
+        Button {
+            let next: SlomoRate = cam.settings.slomoRate == .x240 ? .x120 : .x240
+            cam.settings.slomoRate = next
+            cam.settings.save()
+            cam.reconfigure()
+        } label: {
+            // Hiện mức ĐANG chạy, không phải mức đã chọn: camera trước chỉ
+            // đạt 120fps nên hai giá trị có thể lệch nhau, và người dùng cần
+            // thấy đúng thứ máy sắp quay.
+            Text(cam.activeSlomoFps.map { "\(Int($0.rounded())) fps" } ?? cam.settings.slomoRate.rawValue)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.yellow)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(.white.opacity(0.15), in: Capsule())
+                .frame(height: 44)
         }
     }
  
@@ -1144,14 +1165,24 @@ struct SettingsSheet: View {
                 Section("Video") {
                     Picker("Chất lượng", selection: Binding(
                         get: { cam.settings.videoQuality },
-                        set: { cam.settings.videoQuality = $0; cam.settings.save(); cam.reconfigure() }
+                        // Chất lượng chỉ tác động tới preset của chế độ Video;
+                        // ở chế độ khác dựng lại session chỉ tổ nháy preview.
+                        set: {
+                            cam.settings.videoQuality = $0
+                            cam.settings.save()
+                            if cam.settings.mode == .video { cam.reconfigure() }
+                        }
                     )) {
                         ForEach(VideoQuality.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
  
                     Picker("Quay chậm", selection: Binding(
                         get: { cam.settings.slomoRate },
-                        set: { cam.settings.slomoRate = $0; cam.settings.save() }
+                        set: {
+                            cam.settings.slomoRate = $0
+                            cam.settings.save()
+                            if cam.settings.mode == .slomo { cam.reconfigure() }
+                        }
                     )) {
                         ForEach(SlomoRate.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }

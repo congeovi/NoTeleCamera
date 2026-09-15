@@ -75,7 +75,11 @@ enum SlomoRate: String, CaseIterable {
  
     var fps: Double { self == .x120 ? 120 : 240 }
     /// Hệ số làm chậm khi xuất ra (phát ở 30fps).
-    var slowdown: Double { fps / 30.0 }
+    ///
+    /// Nhận fps THẬT đã quay được chứ không đọc `fps` của mức đã chọn: camera
+    /// trước chỉ đạt 120fps nên mức chọn và mức chạy có thể lệch nhau, lấy
+    /// nhầm là video ra sai tốc độ gấp đôi.
+    static func slowdown(forCapturedFps fps: Double) -> Double { fps / 30.0 }
 }
  
 // MARK: - Tua nhanh
