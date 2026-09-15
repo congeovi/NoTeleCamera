@@ -71,6 +71,7 @@ extension CameraManager {
         let flash = settings.flashMode
         let mirror = isFront
         let angle = captureRotationAngle
+        let bias = exposureBias
  
         capturesInFlight += 1
         isCapturing = true
@@ -117,8 +118,15 @@ extension CameraManager {
             // nhích là ảnh nhoè; phải giữ yên ~2s mới ra ảnh nét.
             // Trần thật nằm ở photoOutput.maxPhotoQualityPrioritization (.balanced),
             // đặt cao hơn trần ở đây là AVFoundation ném exception.
+            //
+            // Đã chỉnh EV thì tụt xuống .speed. Deep Fusion / Smart HDR gom
+            // nhiều khung rồi TỰ CÂN SÁNG LẠI, xoá đúng phần bù trừ người dùng
+            // vừa đặt — cảm biến có phơi sáng theo bias (nên preview sáng lên)
+            // nhưng ảnh ra vẫn y như cũ. .speed chụp một khung, không qua đường
+            // gộp đó, nên ảnh giữ đúng độ sáng đang thấy trên preview.
             let ceiling = self.photoOutput.maxPhotoQualityPrioritization
-            let wanted: AVCapturePhotoOutput.QualityPrioritization = isBurst ? .speed : .balanced
+            let wanted: AVCapturePhotoOutput.QualityPrioritization =
+                (isBurst || bias != 0) ? .speed : .balanced
             photoSettings.photoQualityPrioritization = wanted.rawValue <= ceiling.rawValue ? wanted : ceiling
             photoSettings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
  

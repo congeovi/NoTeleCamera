@@ -324,6 +324,16 @@ struct ContentView: View {
     /// Bán kính mờ đang áp lên ảnh đóng băng khi chuyển chế độ: mờ dần vào
     /// ngay khi bấm mode, giữ đến khi camera sẵn sàng rồi tan về 0.
     @State private var switchBlur: CGFloat = 0
+    /// Bán kính mờ tối đa khi chuyển chế độ. 64pt cùng opaque: true che hẳn
+    /// chi tiết khung cảnh bên dưới, cho ra khối bokeh mịn.
+    ///
+    /// Một lượt blur duy nhất, đừng chồng thêm: hai blur Gauss nối tiếp cộng
+    /// theo bình phương (`sqrt(r1² + r2²)`) chứ không cộng thẳng, nên lượt thứ
+    /// hai tốn nguyên một vòng render mà gần như không làm mờ thêm. Tệ hơn,
+    /// lượt non-opaque chạy trước sẽ hút pixel trong suốt ngoài biên làm mép
+    /// màn hình nhạt dần — đúng thứ opaque: true sinh ra để chặn, và lượt sau
+    /// không cứu lại được.
+    private static let modeSwitchBlurRadius: CGFloat = 64
     /// Độ đục của ảnh đóng băng — rượt về 0 cùng lúc blur tan để chuyển mượt
     /// sang khung sống bên dưới.
     @State private var freezeOpacity: Double = 1
@@ -431,7 +441,8 @@ struct ContentView: View {
             )
             // Không chụp được snapshot (preview chưa có kích thước) thì làm
             // mờ thẳng khung sống — vẫn đúng ý "mờ đến khi camera sẵn sàng".
-            .blur(radius: (modeFreezeFrame == nil && cam.isModeTransitioning) ? 16 : 0)
+            .blur(radius: (modeFreezeFrame == nil && cam.isModeTransitioning) ? Self.modeSwitchBlurRadius : 0,
+                  opaque: true)
             .animation(.easeIn(duration: 0.15), value: cam.isModeTransitioning)
  
 
@@ -444,7 +455,7 @@ struct ContentView: View {
                 Image(uiImage: modeFreezeFrame)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .blur(radius: switchBlur)
+                    .blur(radius: switchBlur, opaque: true)
                     .opacity(freezeOpacity)
                     .allowsHitTesting(false)
                     .transition(.identity)
@@ -506,7 +517,7 @@ struct ContentView: View {
         freezeOpacity = 1
         switchBlur = 0
         modeFreezeFrame = image
-        withAnimation(.easeIn(duration: 0.15)) { switchBlur = 16 }
+        withAnimation(.easeIn(duration: 0.15)) { switchBlur = Self.modeSwitchBlurRadius }
         // Lưới an toàn thứ hai của UI: nếu cả tín hiệu sẵn sàng lẫn watchdog
         // của CameraManager đều mất, vẫn phải tan mờ.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {

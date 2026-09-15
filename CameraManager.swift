@@ -1067,9 +1067,12 @@ final class CameraManager: NSObject, ObservableObject {
         focusHideTask?.cancel()
         exposureDragStart = nil
         isLocked = false
-        focusPoint = nil
         exposureBias = 0
         lastPushedBias = 0
+        // Mờ dần như mọi đường ẩn ô vàng khác, thay vì biến mất đột ngột.
+        withAnimation(.easeOut(duration: 0.25)) {
+            focusPoint = nil
+        }
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
             if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
