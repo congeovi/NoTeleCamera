@@ -928,10 +928,17 @@ final class CameraManager: NSObject, ObservableObject {
  
     // MARK: - Lấy nét & phơi sáng
 
-    /// Bao nhiêu point vuốt dọc thì EV đổi 1 nấc. Bằng đúng quãng đường icon
-    /// mặt trời đi được trên đường ray (xem `FocusIndicatorView`), nên mặt
-    /// trời bám sát đầu ngón tay 1:1 thay vì trôi chậm hơn.
-    static let evDragPointsPerStop: CGFloat = 33
+    /// Bao nhiêu point vuốt dọc thì EV đổi 1 nấc.
+    ///
+    /// Trước đây đặt 33 để mặt trời bám đầu ngón tay 1:1 trên đường ray của
+    /// `FocusIndicatorView`. Nhưng đường ray chỉ dài 132 point, nên vuốt hết
+    /// ±2 EV chỉ tốn 132 point — nhích tay một chút là EV nhảy cả nấc, chỉnh
+    /// không trúng. Camera gốc không buộc icon bám tay: icon đi trên đoạn ray
+    /// ngắn, còn ngón tay phải đi quãng dài hơn nhiều.
+    ///
+    /// 90 point/nấc → hết dải ±2 EV tốn 360 point, cỡ nửa chiều cao preview.
+    /// Muốn chậm hơn nữa thì tăng số này.
+    static let evDragPointsPerStop: CGFloat = 90
 
     func focus(at devicePoint: CGPoint, uiPoint: CGPoint) {
         guard let device else { return }

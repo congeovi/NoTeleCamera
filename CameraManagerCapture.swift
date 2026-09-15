@@ -71,8 +71,13 @@ extension CameraManager {
         let flash = settings.flashMode
         let mirror = isFront
         let angle = captureRotationAngle
-        let bias = exposureBias
- 
+        // Kẹp vào đúng khoảng thiết bị chấp nhận. Giá trị ngoài khoảng là
+        // AVFoundation ném exception khi dựng bracket chứ không trả lỗi.
+        let bias: Float = {
+            guard let dev = device else { return 0 }
+            return min(max(exposureBias, dev.minExposureTargetBias), dev.maxExposureTargetBias)
+        }()
+
         capturesInFlight += 1
         isCapturing = true
         shutterFlashTrigger += 1
@@ -92,14 +97,57 @@ extension CameraManager {
  
             // ── Từ đây trở xuống mọi cờ đều là trạng thái THẬT của output ──
  
-            let rawFormat: OSType? = (wantRAW && self.photoOutput.isAppleProRAWEnabled)
+            // ── Đường EV ──────────────────────────────────────────────────
+            // setExposureTargetBias chỉ đổi phơi sáng CẢM BIẾN. Preview là
+            // luồng cảm biến nên sáng lên ngay, nhưng ảnh tĩnh còn đi qua tầng
+            // xử lý của ISP (zero shutter lag gộp khung + Smart HDR + gain map
+            // HDR của HEIF); tầng đó tự tone-map lại về mức sáng "đúng" theo
+            // phân tích cảnh và xoá gần hết phần bù trừ. Hạ
+            // photoQualityPrioritization xuống .speed không đủ — vẫn cùng một
+            // đường xử lý.
+            //
+            // AVCapturePhotoBracketSettings với đúng một nấc
+            // AVCaptureAutoExposureBracketedStillImageSettings là API Apple
+            // dành riêng cho "chụp một tấm ở EV ±X". Bracket không đi qua
+            // fusion nên độ sáng ra đúng bằng cái đang thấy trên preview.
+            //
+            // Cái giá: bracket loại trừ Live Photo, depth (xoá phông chân
+            // dung), flash và ProRAW. Đã chỉnh EV thì tấm đó mất cả bốn —
+            // đây là đánh đổi có chủ đích, EV được ưu tiên trước.
+            // maxBracketedCapturePhotoCount trả 0 khi cấu hình hiện tại không
+            // bracket được (Live Photo hoặc depth đang bật ở output). Rơi về
+            // đường cũ thì EV lại bị nuốt, nên phải nói ra chứ không im lặng.
+            let useBracket = bias != 0 && self.photoOutput.maxBracketedCapturePhotoCount >= 1
+            if bias != 0 && !useBracket {
+                Task { @MainActor in
+                    self.statusMessage = "Chế độ này chưa giữ được mức EV đã chỉnh."
+                }
+            }
+
+            let rawFormat: OSType? = (wantRAW && !useBracket && self.photoOutput.isAppleProRAWEnabled)
                 ? self.photoOutput.availableRawPhotoPixelFormatTypes.first(where: {
                     AVCapturePhotoOutput.isAppleProRAWPixelFormat($0)
                 })
                 : nil
- 
+
             var photoSettings: AVCapturePhotoSettings
-            if let rawFormat {
+            if useBracket {
+                let evStep = AVCaptureAutoExposureBracketedStillImageSettings
+                    .autoExposureSettings(exposureTargetBias: bias)
+                let processed: [String: Any] = self.photoOutput.availablePhotoCodecTypes.contains(.hevc)
+                    ? [AVVideoCodecKey: AVVideoCodecType.hevc]
+                    : [AVVideoCodecKey: AVVideoCodecType.jpeg]
+                let bracket = AVCapturePhotoBracketSettings(
+                    rawPixelFormatType: 0,
+                    processedFormat: processed,
+                    bracketedSettings: [evStep]
+                )
+                // Bracket chụp liên tiếp nên dễ rung hơn một khung đơn; bù lại
+                // bằng ổn định thấu kính nếu máy có.
+                bracket.isLensStabilizationEnabled =
+                    self.photoOutput.isLensStabilizationDuringBracketedCaptureSupported
+                photoSettings = bracket
+            } else if let rawFormat {
                 // ProRAW: file DNG kèm một bản HEIF/JPEG để xem nhanh.
                 photoSettings = AVCapturePhotoSettings(
                     rawPixelFormatType: rawFormat,
@@ -111,34 +159,34 @@ extension CameraManager {
                 photoSettings = AVCapturePhotoSettings()
             }
  
-            photoSettings.flashMode = self.photoOutput.supportedFlashModes.contains(flash) ? flash : .off
+            // Bracket không đi cùng đèn: đặt flashMode khác .off là exception.
+            photoSettings.flashMode = (!useBracket && self.photoOutput.supportedFlashModes.contains(flash))
+                ? flash : .off
             // Burst ưu tiên tốc độ; chụp đơn dùng .balanced — vẫn có Deep Fusion
             // và Smart HDR, nhưng KHÔNG mở cửa cho Night mode phơi sáng dài.
             // Với .quality máy gom khung trong cả giây sau khi bấm, hễ tay nhúc
             // nhích là ảnh nhoè; phải giữ yên ~2s mới ra ảnh nét.
             // Trần thật nằm ở photoOutput.maxPhotoQualityPrioritization (.balanced),
             // đặt cao hơn trần ở đây là AVFoundation ném exception.
-            //
-            // Đã chỉnh EV thì tụt xuống .speed. Deep Fusion / Smart HDR gom
-            // nhiều khung rồi TỰ CÂN SÁNG LẠI, xoá đúng phần bù trừ người dùng
-            // vừa đặt — cảm biến có phơi sáng theo bias (nên preview sáng lên)
-            // nhưng ảnh ra vẫn y như cũ. .speed chụp một khung, không qua đường
-            // gộp đó, nên ảnh giữ đúng độ sáng đang thấy trên preview.
             let ceiling = self.photoOutput.maxPhotoQualityPrioritization
             let wanted: AVCapturePhotoOutput.QualityPrioritization =
-                (isBurst || bias != 0) ? .speed : .balanced
+                (isBurst || useBracket) ? .speed : .balanced
             photoSettings.photoQualityPrioritization = wanted.rawValue <= ceiling.rawValue ? wanted : ceiling
-            photoSettings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
- 
+            // Bracket không nhận mọi kích thước mà format công bố; để nguyên
+            // mặc định của format thay vì ép lên trần (48MP) rồi ăn exception.
+            if !useBracket {
+                photoSettings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            }
+
             var live = false
-            if wantLive && self.photoOutput.isLivePhotoCaptureEnabled {
+            if wantLive && !useBracket && self.photoOutput.isLivePhotoCaptureEnabled {
                 photoSettings.livePhotoMovieFileURL = FileManager.default.temporaryDirectory
                     .appendingPathComponent("live_\(UUID().uuidString).mov")
                 live = true
             }
  
             var depthOn = false
-            if wantPortrait && self.photoOutput.isDepthDataDeliveryEnabled {
+            if wantPortrait && !useBracket && self.photoOutput.isDepthDataDeliveryEnabled {
                 photoSettings.isDepthDataDeliveryEnabled = true
                 // Giữ depth riêng để tự dựng xoá phông, không nhúng vào file.
                 photoSettings.embedsDepthDataInPhoto = false

@@ -102,8 +102,11 @@ struct FocusIndicatorView: View {
     @State private var appearScale: CGFloat = 1.35
 
     private let boxSize: CGFloat = 70
-    /// Nửa quãng đường của mặt trời = 2 nấc EV. 66 / 2 = 33 point mỗi nấc,
-    /// khớp đúng `CameraManager.evDragPointsPerStop` nên icon bám tay 1:1.
+    /// Nửa quãng đường của mặt trời trên ray = mức EV tối đa (±2).
+    ///
+    /// Không còn khớp với `CameraManager.evDragPointsPerStop` — cố ý: icon
+    /// đi trên đoạn ray ngắn này, còn ngón tay phải vuốt quãng dài hơn nhiều
+    /// thì EV mới chỉnh được mịn, giống Camera gốc.
     private let halfTrack: CGFloat = 66
 
     var body: some View {
