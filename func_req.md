@@ -180,6 +180,13 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
  
 - [x] Ba tỉ lệ: 4:3 / 16:9 / 1:1, đổi có hiệu ứng
 - [x] Chế độ quay luôn dùng khung 16:9 bất kể tỉ lệ đang chọn
+- [x] Khung preview khoá đúng tỉ lệ file sẽ ghi ra (`CameraManager.outputAspectRatio`):
+      4:3 → khung 3:4, 16:9 và mọi chế độ quay → khung 9:16, 1:1 → khung vuông.
+      Preview vẫn là lớp nền dưới cùng; `aspectRatio(.fit)` canh giữa nên hở viền
+      đen trên/dưới, khung nào dài thì tràn xuống dưới cụm nút. Đổi tỉ lệ hoặc
+      đổi chế độ thì khung co giãn theo trong 0,25 giây
+- [x] Live Photo / ProRAW đang bật thì khung preview đứng ở 4:3 cho khớp file
+      (ảnh không cắt được), kèm dòng nhắc trong Cài đặt
 - [x] 4:3 lưu nguyên file gốc, giữ đủ metadata
 - [x] 16:9 và 1:1 cắt canh giữa rồi lưu JPEG 95% — chỉ khi chụp thường,
       vì cắt sẽ phá cặp Live Photo và không áp được cho RAW
@@ -231,7 +238,8 @@ Lưu qua `UserDefaults`, khôi phục khi mở lại app:
 - [x] Quét mã · Cường độ xoá phông
 ## 23. Giao diện
  
-- [x] Preview cắt theo tỉ lệ đang chọn, nền đen, ẩn thanh trạng thái
+- [x] Preview là lớp nền dưới cùng, khung khoá theo tỉ lệ file sẽ ghi (viền đen
+      trên/dưới), nháy trắng khi bấm máy phủ cả màn hình, ẩn thanh trạng thái
 - [x] Ép chế độ tối
 - [x] Bảng cài đặt dạng sheet nửa màn hình
 - [x] Huy hiệu xác nhận "Ống tele 77mm đã bị vô hiệu hoá" trong cài đặt

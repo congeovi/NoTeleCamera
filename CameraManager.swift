@@ -928,7 +928,25 @@ final class CameraManager: NSObject, ObservableObject {
         if settings.mode == .portrait { return [1.0, 2.0] }
         return [0.5, 1.0, 2.0]
     }
- 
+
+    /// Tỉ lệ rộng/cao của khung file THẬT SỰ ghi ra khi cầm máy dọc. UI khoá
+    /// khung preview theo số này để mắt thấy đúng vùng ảnh/video sẽ có.
+    ///
+    /// Ba nhánh dưới đây phải khớp với đường ghi file:
+    ///  • mọi chế độ quay (video / quay chậm / tua nhanh) đều ghi ở 16:9 —
+    ///    tỉ lệ khung đang chọn trong Cài đặt không áp cho video;
+    ///  • Live Photo và ProRAW không cắt được (xem `savePhoto` trong
+    ///    CameraManagerCapture), nên ảnh vẫn ra 4:3 dù người dùng chọn khung
+    ///    khác — preview phải đứng cùng chỗ với file, đừng hứa hão.
+    var outputAspectRatio: CGFloat {
+        if settings.mode.isRecordingMode { return 9.0 / 16.0 }
+        if settings.mode == .photo {
+            if settings.livePhotoOn, supportsLivePhoto { return 3.0 / 4.0 }
+            if settings.photoFormat == .proRAW, supportsProRAW { return 3.0 / 4.0 }
+        }
+        return settings.aspect.value
+    }
+
     // MARK: - Lấy nét & phơi sáng
 
     /// Bao nhiêu point vuốt dọc thì EV đổi 1 nấc.

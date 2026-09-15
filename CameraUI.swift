@@ -485,6 +485,16 @@ struct ContentView: View {
             if cam.isProcessing { processingOverlay }
             if let msg = cam.statusMessage { statusToast(msg) }
  
+            // Nháy trắng ngay lúc bấm máy, giống Camera gốc — bằng chứng trực
+            // quan rằng đã chụp, vì isCapturing đôi khi trả về quá nhanh để mắt
+            // kịp thấy nút thu nhỏ lại. Ở lớp ngoài cùng chứ không nằm trong
+            // previewArea: khung preview đã bị khoá theo tỉ lệ file nên nháy
+            // phải phủ cả màn hình như Camera gốc, không chỉ phủ khung ảnh.
+            Color.white
+                .opacity(shutterFlashOpacity)
+                .allowsHitTesting(false)
+                .ignoresSafeArea()
+
             HiddenVolumeView(shutter: volume).frame(width: 0, height: 0)
         }
         .preferredColorScheme(.dark)
@@ -600,15 +610,27 @@ struct ContentView: View {
                 centerBadge("\(cam.timeLapseFrames) khung")
             }
 
-            // Nháy trắng ngay lúc bấm máy, giống Camera gốc — bằng chứng
-            // trực quan rằng đã chụp, vì isCapturing đôi khi trả về quá
-            // nhanh để mắt kịp thấy nút thu nhỏ lại.
-            Color.white
-                .opacity(shutterFlashOpacity)
-                .allowsHitTesting(false)
         }
+        // Khung preview khoá đúng tỉ lệ file sẽ ghi ra (xem
+        // `CameraManager.outputAspectRatio`): 1:1 → khung vuông, 16:9 và mọi
+        // chế độ quay → khung 9:16, 4:3 → khung 3:4. aspectRatio(.fit) canh
+        // giữa khung trong màn hình nên hở ra hai dải đen trên/dưới; khung nào
+        // dài thì tràn xuống dưới cụm nút, nút vẫn nằm trên như cũ.
+        //
+        // videoGravity = .resizeAspectFill được giữ nguyên: nó đúng bằng phép
+        // "cắt canh giữa" mà savePhoto dùng, nên khung vuông / 16:9 nhìn thấy
+        // đúng vùng mà file sẽ chứa. Riêng 4:3 thì luồng preview vốn đã 4:3
+        // (preset .photo) nên fill = fit, thấy trọn khung.
+        .aspectRatio(cam.outputAspectRatio, contentMode: .fit)
+        // Ảnh đóng băng chụp lúc đổi chế độ mang tỉ lệ của khung cũ; để .fill
+        // trong khung mới thì nó tràn ra ngoài nếu không chặn.
+        .clipShape(Rectangle())
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
+        // "Đổi tỉ lệ có hiệu ứng": khung co giãn theo lúc đổi tỉ lệ hoặc đổi
+        // chế độ, không nhảy một cái. Chỉ chạy khi chính tỉ lệ đổi nên lớp mờ
+        // chuyển chế độ (animation riêng, gắn sát CameraPreview) vẫn giữ nhịp.
+        .animation(.easeInOut(duration: 0.25), value: cam.outputAspectRatio)
         .onChange(of: cam.shutterFlashTrigger) { _, _ in
             shutterFlashOpacity = 0.9
             withAnimation(.easeOut(duration: 0.25)) { shutterFlashOpacity = 0 }
@@ -1063,6 +1085,21 @@ struct ContentView: View {
 struct SettingsSheet: View {
     @ObservedObject var cam: CameraManager
     @Binding var isPresented: Bool
+
+    /// Live Photo / ProRAW đang bật thì `savePhoto` bỏ qua bước cắt tỉ lệ, nên
+    /// ảnh vẫn ra 4:3 dù người dùng chọn khung khác — khung preview cũng đứng ở
+    /// 4:3 theo (xem `CameraManager.outputAspectRatio`). Phải nói ra, không thì
+    /// người dùng tưởng chức năng đổi tỉ lệ hỏng.
+    private var cropSkippedNotice: String? {
+        guard cam.settings.aspect != .r4x3, cam.settings.mode == .photo else { return nil }
+        if cam.settings.livePhotoOn, cam.supportsLivePhoto {
+            return "Live Photo đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ sẽ phá cặp Live Photo. Tắt Live Photo nếu muốn khung \(cam.settings.aspect.rawValue)."
+        }
+        if cam.settings.photoFormat == .proRAW, cam.supportsProRAW {
+            return "ProRAW đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ không áp được cho RAW. Chuyển định dạng về HEIF nếu muốn khung \(cam.settings.aspect.rawValue)."
+        }
+        return nil
+    }
  
     var body: some View {
         NavigationStack {
@@ -1096,7 +1133,12 @@ struct SettingsSheet: View {
                 Section {
                     EmptyView()
                 } footer: {
-                    Text("Live Photo và đường quay video của app hiện chưa dùng chung được, nên khi Live Photo bật thì QuickTake (giữ nút chụp để quay) tạm nghỉ; tắt Live Photo là QuickTake có lại.")
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Live Photo và đường quay video của app hiện chưa dùng chung được, nên khi Live Photo bật thì QuickTake (giữ nút chụp để quay) tạm nghỉ; tắt Live Photo là QuickTake có lại.")
+                        // Khung preview đứng ở 4:3 đúng như file sẽ lưu, nói ra để
+                        // không tưởng chức năng đổi tỉ lệ hỏng.
+                        if let notice = cropSkippedNotice { Text(notice) }
+                    }
                 }
  
                 Section("Video") {
