@@ -4,8 +4,14 @@ App chụp ảnh & quay video cho iPhone 13 Pro, khoá cứng ở cụm Dual Wid
 (ống siêu rộng 0,5× + ống chính 1×). **Ống tele 77mm không bao giờ được
 cấp điện**, nên OIS hỏng của nó không kêu và không lọt vào tiếng video.
  
-- Yêu cầu: iOS 17+, Xcode 15+, chạy trên máy thật
-- Trạng thái: Giai đoạn 1 + 2 + 3 đã xong
+- Yêu cầu: iOS 26+, Xcode 26+ (CI chạy macos-26 + Xcode 26.6, SDK iOS 26),
+  chạy trên máy thật
+- Trạng thái: Giai đoạn 1 + 2 + 3 đã xong; giao diện đã đổi sang bố cục kiểu
+  Camera iOS 26 (Liquid Glass thật): thanh trên là cụm 3 nút canh giữa (đèn ·
+  Live Photo · tỉ lệ khung), hẹn giờ và lối vào Cài đặt nằm trong menu ba chấm ở
+  hàng nút chụp, zoom là các mốc pill, hàng dưới cùng là thumbnail tròn · pill 5
+  chế độ · nút đổi camera. Nút macro nhanh đã bỏ khỏi màn hình chính (macro chỉ
+  còn công tắc trong Cài đặt)
 ### Các file mã nguồn
  
 | File | Nội dung |
@@ -49,7 +55,8 @@ Thêm vào Info.plist, thiếu là app crash:
       1× (trước)
 ## 2. Zoom
  
-- [x] Nút chọn nhanh, nút đang chọn phóng to và chuyển màu vàng
+- [x] Nút chọn nhanh; mốc đang chọn nằm trong viên thuốc kính tối, chữ vàng và
+      thêm dấu "×"; các mốc còn lại là chữ trơn có bóng đổ nhẹ
 - [x] Pinch để zoom mượt, nối tiếp đúng mức zoom trước đó
 - [x] Dùng `MagnifyGesture` thay `.onTapGesture` để không chồng lên cử chỉ
       chạm lấy nét bên trong `CameraPreview`
@@ -132,6 +139,8 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Chỉ bật trên máy có ống siêu rộng, camera sau, chế độ Ảnh
 - [x] Bật macro = ép về 0,5× + `autoFocusRangeRestriction = .near`
 - [x] Zoom vượt 0,6× thì macro tự tắt
+- [x] Không còn nút macro nhanh trên màn hình chính (thanh trên chỉ còn 3 nút);
+      bật/tắt macro bằng công tắc "Macro" trong bảng Cài đặt
 ## 10. Chụp liên tiếp (burst)
  
 - [x] Kéo nút chụp sang trái để bắt đầu
@@ -140,7 +149,8 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Burst dùng `.speed` thay vì `.quality` để bắt kịp nhịp
 ## 11. Hẹn giờ
  
-- [x] Ba mức: Tắt / 3 giây / 10 giây, bấm icon để xoay vòng
+- [x] Ba mức: Tắt / 3 giây / 10 giây, chọn trong menu ba chấm (nút ba chấm có
+      chấm vàng báo hiệu khi hẹn giờ đang bật)
 - [x] Đếm ngược số to giữa màn hình, nền mờ
 - [x] Rung nhẹ mỗi giây
 - [x] Chạm màn hình hoặc bấm lại nút chụp để huỷ
@@ -213,6 +223,9 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 ## 17. Khung hình & hỗ trợ bố cục
  
 - [x] Ba tỉ lệ: 4:3 / 16:9 / 1:1, đổi có hiệu ứng
+- [x] Nút tỉ lệ nằm ở thanh trên (chỉ hiện ở chế độ Ảnh); nhãn là tỉ lệ đang áp
+      dụng thật, Live Photo hoặc ProRAW đang bật thì nút mờ đi và bấm vào chỉ
+      hiện toast giải thích — lựa chọn vẫn được lưu như trước
 - [x] Chế độ quay luôn dùng khung 16:9 bất kể tỉ lệ đang chọn
 - [x] Khung preview khoá đúng tỉ lệ file sẽ ghi ra (`CameraManager.outputAspectRatio`):
       4:3 → khung 3:4, 16:9 và mọi chế độ quay → khung 9:16, 1:1 → khung vuông.
@@ -275,7 +288,15 @@ Lưu qua `UserDefaults`, khôi phục khi mở lại app:
 - [x] Preview là lớp nền dưới cùng, khung khoá theo tỉ lệ file sẽ ghi (viền đen
       trên/dưới), nháy trắng khi bấm máy phủ cả màn hình, ẩn thanh trạng thái
 - [x] Ép chế độ tối
-- [x] Bảng cài đặt dạng sheet nửa màn hình
+- [x] Bảng cài đặt dạng sheet nửa màn hình (mở từ menu ba chấm)
+- [x] Thanh trên là cụm 3 nút canh giữa: đèn · Live Photo · tỉ lệ khung; chế độ
+      quay chậm hiện mốc fps ở chỗ nút tỉ lệ, đang quay chỉ còn nút đèn pin
+- [x] Đồng hồ quay (chấm đỏ) và huy hiệu AE/AF LOCK nằm ngay dưới cm nút thanh trên
+- [x] Hàng nút chụp: nút chụp ở chính giữa, menu ba chấm (hẹn giờ + Cài đặt) bên
+      phải, bên trái để trống vì đã bỏ nút macro
+- [x] Hàng dưới cùng: thumbnail tròn · pill 5 chế độ · nút đổi camera; pill chế độ
+      cuộn ngang, mốc đang chọn có nền kính sáng hơn và khối kính trượt sang ô mới
+- [x] Toàn bộ nút và pill dùng Liquid Glass thật (`glassEffect`, `GlassEffectContainer`)
 - [x] Huy hiệu xác nhận "Ống tele 77mm đã bị vô hiệu hoá" trong cài đặt
 ---
  

@@ -504,6 +504,9 @@ struct ContentView: View {
     @StateObject private var volume = VolumeShutter()
     @State private var pinchStart: CGFloat = 1.0
     @State private var showSettings = false
+    /// Không gian tên cho hiệu ứng morph của Liquid Glass: mốc chế độ đang chọn
+    /// trượt từ ô này sang ô kia thay vì tắt phụt rồi bật lại, như Camera gốc.
+    @Namespace private var glassNamespace
     @State private var shutterDrag: CGFloat = 0
     /// Cú vuốt ngang trên khung ngắm chỉ được đổi ĐÚNG MỘT chế độ: cờ này chốt
     /// lại ngay sau bước đầu tiên và chỉ mở khi nhấc tay.
@@ -553,9 +556,8 @@ struct ContentView: View {
                 if !cam.isRecording && !cam.isProcessing {
                     zoomSelector
                     if cam.settings.mode == .portrait { portraitSlider }
-                    modeSelector
                 }
-                bottomBar
+                bottomCluster
             }
  
             if let code = cam.scannedCode, !cam.isRecording { codeBanner(code) }
@@ -842,77 +844,156 @@ struct ContentView: View {
  
     // MARK: Thanh trên
  
+    /// Cụm nút giữa thanh trên: đèn · Live Photo · tỉ lệ khung — đúng 3 nút như
+    /// ảnh mẫu. Nút hẹn giờ và lối vào Cài đặt đã dời xuống `menuButton` (menu
+    /// ba chấm) ở hàng nút chụp, nên thanh trên chỉ còn việc của camera.
     private var topBar: some View {
-        HStack(spacing: 0) {
-            Button {
-                usesTorch ? cam.setTorch(!cam.torchOn) : cam.cycleFlash()
-            } label: {
-                Image(systemName: usesTorch ? (cam.torchOn ? "bolt.fill" : "bolt.slash.fill") : flashIcon)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(isLightActive ? .yellow : .white)
-                    .frame(width: 42, height: 44)
+        VStack(spacing: 10) {
+            HStack(spacing: 26) {
+                lightButton
+ 
+                if !cam.isRecording {
+                    if cam.settings.mode == .slomo {
+                        slomoRateButton
+                    } else if cam.settings.mode == .photo {
+                        if cam.supportsLivePhoto { livePhotoButton }
+                        aspectButton
+                    }
+                }
             }
+            .frame(height: 46)
  
-            if !cam.settings.mode.isRecordingMode && !cam.isRecording {
-                timerButton
-                if cam.supportsLivePhoto && cam.settings.mode == .photo { livePhotoButton }
-                if cam.supportsMacro && !cam.isFront && cam.settings.mode == .photo { macroButton }
-            } else if cam.settings.mode == .slomo && !cam.isRecording {
-                slomoRateButton
-            }
- 
-            Spacer()
- 
+            // Đồng hồ quay và huy hiệu AE/AF LOCK nằm dưới cụm nút chứ không chen
+            // vào giữa: cụm nút giờ đã canh giữa màn hình, nhét thêm là lệch.
             if cam.isRecording {
-                HStack(spacing: 6) {
-                    Circle().fill(.red).frame(width: 8, height: 8)
-                    Text(timeString(cam.recordDuration))
-                        .font(.system(size: 15, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white)
-                }
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(.black.opacity(0.4), in: Capsule())
+                recordBadge
             } else if cam.isLocked {
-                Button { cam.unlock() } label: {
-                    Text("AE/AF LOCK")
-                        .font(.system(size: 11, weight: .semibold))
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(.yellow, in: RoundedRectangle(cornerRadius: 4))
-                        .foregroundStyle(.black)
-                }
+                lockBadge
             }
- 
-            Spacer()
- 
-            Button { showSettings = true } label: {
-                Image(systemName: "chevron.down.circle")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 44)
-            }
-            .opacity(cam.isRecording ? 0 : 1)
-            .disabled(cam.isRecording)
         }
         .padding(.horizontal, 10)
-        .frame(height: 50)
+        .padding(.top, 2)
     }
  
-    private var timerButton: some View {
+    /// Nút đèn: xoay vòng mức flash ở chế độ ảnh, bật/tắt đèn pin ở chế độ quay.
+    private var lightButton: some View {
         Button {
-            let all = TimerOption.allCases
-            let idx = all.firstIndex(of: cam.settings.timerOption) ?? 0
-            cam.settings.timerOption = all[(idx + 1) % all.count]
-            cam.settings.save()
+            usesTorch ? cam.setTorch(!cam.torchOn) : cam.cycleFlash()
         } label: {
-            HStack(spacing: 2) {
-                Image(systemName: "timer").font(.system(size: 15, weight: .medium))
-                if cam.settings.timerOption != .off {
-                    Text("\(cam.settings.timerOption.rawValue)").font(.system(size: 11, weight: .bold))
-                }
-            }
-            .foregroundStyle(cam.settings.timerOption == .off ? .white : .yellow)
-            .frame(height: 44).padding(.horizontal, 5)
+            Image(systemName: usesTorch ? (cam.torchOn ? "bolt.fill" : "bolt.slash.fill") : flashIcon)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(isLightActive ? .yellow : .white)
+                .frame(width: 48, height: 46)
+                .contentShape(Circle())
         }
+        .glassEffect(isLightActive ? Glass.regular.tint(.yellow.opacity(0.55)).interactive(true)
+                                   : Glass.regular.interactive(true),
+                     in: Circle())
+    }
+ 
+    private var recordBadge: some View {
+        HStack(spacing: 6) {
+            Circle().fill(.red).frame(width: 8, height: 8)
+            Text(timeString(cam.recordDuration))
+                .font(.system(size: 15, weight: .medium, design: .monospaced))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .glassEffect(.regular, in: Capsule())
+    }
+ 
+    /// Bấm vào là mở khoá AE/AF, như nút cũ ở mép phải thanh trên.
+    private var lockBadge: some View {
+        Button { cam.unlock() } label: {
+            Text("AE/AF LOCK")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .contentShape(Capsule())
+        }
+        .glassEffect(.regular.tint(.yellow).interactive(true), in: Capsule())
+    }
+ 
+    /// Menu ba chấm ở hàng nút chụp: chứa hẹn giờ và lối vào Cài đặt. Thanh trên
+    /// chỉ còn 3 nút nên hai thứ đó phải ở đây, đúng như ảnh mẫu.
+    private var menuButton: some View {
+        Menu {
+            Picker("Hẹn giờ", selection: Binding(
+                get: { cam.settings.timerOption },
+                set: { cam.settings.timerOption = $0; cam.settings.save() }
+            )) {
+                Text("Tắt").tag(TimerOption.off)
+                Text("3 giây").tag(TimerOption.three)
+                Text("10 giây").tag(TimerOption.ten)
+            }
+
+            Button { showSettings = true } label: {
+                Label("Cài đặt", systemImage: "gearshape")
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(cam.settings.timerOption == .off ? .white : .yellow)
+                .frame(width: 46, height: 46)
+                .overlay(alignment: .topTrailing) {
+                    // Hẹn giờ giờ nằm trong menu nên phải có chấm vàng báo hiệu,
+                    // không thì bấm máy xong mới giật mình thấy đếm ngược.
+                    if cam.settings.timerOption != .off {
+                        Circle().fill(.yellow)
+                            .frame(width: 9, height: 9)
+                            .overlay(Circle().stroke(.black.opacity(0.45), lineWidth: 1))
+                    }
+                }
+                .contentShape(Circle())
+        }
+        .glassEffect(.regular.interactive(true), in: Circle())
+    }
+
+    /// Nút tỉ lệ khung: xoay vòng 4:3 → 16:9 → 1:1. Nhãn hiện khung đang áp dụng
+    /// (xem `CameraManager.outputAspectRatio`), nên khi Live Photo hoặc
+    /// ProRAW đang giữ ảnh ở 4:3 thì nút mờ đi và bấm vào chỉ báo lý do — không
+    /// hứa hão một khung mà file sẽ không có.
+    private var aspectButton: some View {
+        Button {
+            let all = AspectRatio.allCases
+            let idx = all.firstIndex(of: cam.settings.aspect) ?? 0
+            cam.settings.aspect = all[(idx + 1) % all.count]
+            cam.settings.save()
+            // Lựa chọn vẫn được lưu như trước; chỉ nói thêm vì sao chưa thấy
+            // khung đổi — trước đây phải mở Cài đặt mới đọc được dòng nhắc này.
+            if aspectLocked { cam.statusMessage = aspectLockMessage }
+        } label: {
+            Text(effectiveAspectLabel)
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundStyle(aspectLocked ? .white : .yellow)
+                .frame(width: 48, height: 46)
+                .contentShape(Circle())
+        }
+        .opacity(aspectLocked ? 0.5 : 1)
+        .glassEffect(aspectLocked ? Glass.regular.interactive(true)
+                                  : Glass.regular.tint(.yellow.opacity(0.55)).interactive(true),
+                     in: Circle())
+    }
+
+    /// Ảnh có bị cắt theo khung đang chọn không. Live Photo và ProRAW không cắt
+    /// được (xem `savePhoto` trong CameraManagerCapture) nên cả hai đều khoá ở
+    /// 4:3 — khớp với dòng nhắc trong bảng Cài đặt.
+    private var aspectLocked: Bool {
+        guard cam.settings.mode == .photo else { return false }
+        if cam.settings.livePhotoOn && cam.supportsLivePhoto { return true }
+        if cam.settings.photoFormat == .proRAW && cam.supportsProRAW { return true }
+        return false
+    }
+
+    private var aspectLockMessage: String {
+        if cam.settings.livePhotoOn && cam.supportsLivePhoto {
+            return "Live Photo đang bật nên ảnh vẫn lưu ở 4:3; khung vừa chọn sẽ áp sau khi tắt Live Photo."
+        }
+        return "ProRAW đang bật nên ảnh vẫn lưu ở 4:3; chuyển định dạng về HEIF nếu muốn khung khác."
+    }
+
+    private var effectiveAspectLabel: String {
+        aspectLocked ? AspectRatio.r4x3.rawValue : cam.settings.aspect.rawValue
     }
  
     private var livePhotoButton: some View {
@@ -931,23 +1012,16 @@ struct ContentView: View {
             cam.reconfigure()
         } label: {
             Image(systemName: cam.settings.livePhotoOn ? "livephoto" : "livephoto.slash")
-                .font(.system(size: 17, weight: .medium))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(cam.settings.livePhotoOn ? .yellow : .white)
-                .frame(width: 40, height: 44)
+                .frame(width: 48, height: 46)
+                .contentShape(Circle())
         }
+        .glassEffect(cam.settings.livePhotoOn ? Glass.regular.tint(.yellow.opacity(0.55)).interactive(true)
+                                             : Glass.regular.interactive(true),
+                     in: Circle())
     }
  
-    private var macroButton: some View {
-        Button {
-            cam.setMacro(!cam.settings.macroOn)
-        } label: {
-            Image(systemName: cam.settings.macroOn ? "camera.macro" : "camera.macro.slash")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(cam.settings.macroOn ? .yellow : .white)
-                .frame(width: 40, height: 44)
-        }
-    }
-
     private var slomoRateButton: some View {
         Button {
             let next: SlomoRate = cam.settings.slomoRate == .x240 ? .x120 : .x240
@@ -961,10 +1035,27 @@ struct ContentView: View {
             Text(cam.activeSlomoFps.map { "\(Int($0.rounded())) fps" } ?? cam.settings.slomoRate.rawValue)
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(.yellow)
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.white.opacity(0.15), in: Capsule())
-                .frame(height: 44)
+                .padding(.horizontal, 10)
+                .frame(height: 46)
+                .contentShape(Capsule())
         }
+        .glassEffect(.regular.tint(.yellow.opacity(0.4)).interactive(true), in: Capsule())
+    }
+
+    // MARK: Hàng nút chụp & hàng chế độ
+
+    /// Hàng dưới cùng của màn hình: thumbnail · pill chế độ · nút đổi camera.
+    /// Hai nút hai bên cùng bề rộng nên pill luôn nằm chính giữa.
+    private var modeRow: some View {
+        HStack(spacing: 12) {
+            thumbnailButton
+
+            modeSelector
+
+            flipButton
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 6)
     }
  
     private var usesTorch: Bool { cam.settings.mode.isRecordingMode }
@@ -981,17 +1072,52 @@ struct ContentView: View {
         }
     }
  
-    // MARK: Zoom & thanh trượt
+    // MARK: Hàng nút chụp & zoom
+ 
+    /// Hàng nút chụp: nút chụp ở giữa, menu ba chấm bên phải. Bên trái để trống
+    /// — chỗ đó Camera gốc dành cho nút macro, còn app này đã bỏ macro nhanh
+    /// khỏi màn hình chính (macro chỉ còn công tắc trong Cài đặt).
+    ///
+    /// Dùng ZStack chứ không phải HStack + Spacer: nút chụp phải nằm đúng tâm
+    /// màn hình dù nút bên phải to nhỏ thế nào.
+    private var shutterRow: some View {
+        ZStack {
+            shutterButton
+
+            HStack {
+                Spacer()
+                menuButton
+                    .opacity(cam.isRecording ? 0 : 1)
+                    .disabled(cam.isRecording || cam.isProcessing)
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 10)
+    }
+
+    /// Bọc hàng nút chụp và hàng chế độ trong một khung kính chung: các mảng
+    /// kính gần nhau sẽ tự hoà vào nhau, đúng kiểu iOS 26.
+    private var bottomCluster: some View {
+        GlassEffectContainer(spacing: 18) {
+            VStack(spacing: 4) {
+                shutterRow
+
+                if !cam.isRecording && !cam.isProcessing {
+                    modeRow
+                }
+            }
+        }
+    }
  
     private var zoomSelector: some View {
         HStack(spacing: 8) {
             ForEach(cam.zoomStops, id: \.self) { zoomButton($0) }
         }
-        .padding(6)
-        .background(.black.opacity(0.35), in: Capsule())
-        .padding(.bottom, 10)
+        .padding(.bottom, 12)
     }
- 
+
+    /// Mốc đang chọn mới có nền kính tối + chữ vàng như ảnh mẫu; các mốc còn lại
+    /// chỉ là chữ trơn kèm bóng đổ nhẹ cho đọc được trên nền sáng.
     private func zoomButton(_ value: CGFloat) -> some View {
         let active = abs(cam.displayZoom - value) < 0.05
         let label = value == 0.5 ? "0,5" : String(format: "%g", value)
@@ -1000,11 +1126,15 @@ struct ContentView: View {
             pinchStart = value
         } label: {
             Text(active ? "\(label)×" : label)
-                .font(.system(size: active ? 14 : 13, weight: .semibold))
+                .font(.system(size: active ? 15 : 13, weight: active ? .bold : .semibold))
                 .foregroundStyle(active ? .yellow : .white)
-                .frame(width: active ? 44 : 34, height: active ? 44 : 34)
-                .background(.white.opacity(active ? 0.18 : 0.10), in: Circle())
+                .shadow(color: .black.opacity(active ? 0 : 0.45), radius: 3)
+                .frame(width: active ? 56 : 42, height: 34)
+                .contentShape(Capsule())
         }
+        .glassEffect(active ? Glass.regular.tint(.black.opacity(0.5)).interactive(true)
+                            : Glass.identity,
+                     in: Capsule())
     }
  
     private var portraitSlider: some View {
@@ -1026,11 +1156,17 @@ struct ContentView: View {
  
     // MARK: Chọn chế độ
  
+    /// Pill chế độ: 5 mốc cuộn ngang trong một viên kính, mốc đang chọn có nền
+    /// kính sáng hơn + chữ vàng. Giữ nguyên hành vi cũ: tự canh giữa mốc đang
+    /// chọn dù đổi bằng nút hay bằng cú vuốt ngang trên khung ngắm.
     private var modeSelector: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 20) {
-                    Color.clear.frame(width: 60)
+                HStack(spacing: 4) {
+                    // Hai khoảng đệm trong suốt để mốc đầu và mốc cuối vẫn canh
+                    // được vào giữa pill — cuộn không bị kẹp ở hai đầu.
+                    Color.clear.frame(width: Self.modePillInset)
+
                     ForEach(CaptureMode.ordered) { m in
                         Button {
                             if m == cam.settings.mode {
@@ -1045,14 +1181,32 @@ struct ContentView: View {
                         } label: {
                             Text(m.label)
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.6))
+                                .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.75))
+                                .padding(.horizontal, 10)
+                                .frame(height: 32)
+                                .contentShape(Capsule())
                         }
                         .id(m.id)
+                        // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
+                        // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
+                        // tắt phụt rồi bật lại — GlassEffectContainer lo phần
+                        // morph. Mốc không chọn dùng Glass.identity nên không
+                        // sinh thêm mảng kính nào.
+                        .glassEffect(cam.settings.mode == m
+                                     ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
+                                     : Glass.identity,
+                                     in: Capsule())
+                        .glassEffectID(cam.settings.mode == m ? Self.modeHighlightID : m.id,
+                                       in: glassNamespace)
                     }
-                    Color.clear.frame(width: 60)
+
+                    Color.clear.frame(width: Self.modePillInset)
                 }
-                .padding(.vertical, 8)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
             }
+            .frame(height: 40)
+            .glassEffect(.regular, in: Capsule())
             .onAppear { proxy.scrollTo(cam.settings.mode.id, anchor: .center) }
             // Chế độ có thể đổi từ nút bấm hoặc từ cú vuốt ngang trên khung
             // ngắm — bám theo `settings.mode` để thanh luôn canh giữa đúng chế
@@ -1061,46 +1215,57 @@ struct ContentView: View {
                 withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(m.id, anchor: .center) }
             }
         }
-        .frame(height: 34)
-        .padding(.bottom, 6)
+        .frame(maxWidth: .infinity)
     }
+
+    /// Bề rộng khoảng đệm trong suốt ở hai đầu pill chế độ. Pill hẹp hơn màn
+    /// hình nên con số này chỉ cần đủ để cuộn tới được mốc đầu và mốc cuối.
+    private static let modePillInset: CGFloat = 56
+
+    /// Mã hiệu cố định của mảng kính "mốc chế độ đang chọn" (xem `modeSelector`).
+    private static let modeHighlightID = "mode-highlight"
  
     // MARK: Thanh dưới
  
-    private var bottomBar: some View {
-        HStack {
-            Button {
-                if let url = URL(string: "photos-redirect://") { openURL(url) }
-            } label: {
-                Group {
-                    if let img = cam.lastThumbnail {
-                        Image(uiImage: img).resizable().scaledToFill()
-                    } else {
-                        Color.white.opacity(0.12)
-                    }
+    /// Thumbnail tròn ở góc trái hàng dưới: bấm để mở app Ảnh.
+    private var thumbnailButton: some View {
+        Button {
+            if let url = URL(string: "photos-redirect://") { openURL(url) }
+        } label: {
+            Group {
+                if let img = cam.lastThumbnail {
+                    Image(uiImage: img).resizable().scaledToFill()
+                } else {
+                    Color.white.opacity(0.15)
+                        .overlay(
+                            Image(systemName: "photo")
+                                .font(.system(size: 16))
+                                .foregroundStyle(.white.opacity(0.75))
+                        )
                 }
-                .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
             }
-            .opacity(cam.isRecording ? 0 : 1)
-            .disabled(cam.isRecording)
- 
-            Spacer()
-            shutterButton
-            Spacer()
- 
-            Button { cam.flipCamera() } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(.white)
-                    .frame(width: 52, height: 52)
-                    .background(.white.opacity(0.15), in: Circle())
-            }
-            .opacity(cam.isRecording ? 0 : 1)
-            .disabled(cam.isRecording || cam.isProcessing)
+            .frame(width: 46, height: 46)
+            .clipShape(Circle())
+            .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+            .contentShape(Circle())
         }
-        .padding(.horizontal, 24)
-        .padding(.bottom, 20)
+        .opacity(cam.isRecording ? 0 : 1)
+        .disabled(cam.isRecording)
+    }
+
+    private var flipButton: some View {
+        Button {
+            cam.flipCamera()
+        } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 46, height: 46)
+                .contentShape(Circle())
+        }
+        .glassEffect(.regular.interactive(true), in: Circle())
+        .opacity(cam.isRecording ? 0 : 1)
+        .disabled(cam.isRecording || cam.isProcessing)
     }
  
     private var shutterButton: some View {
@@ -1185,7 +1350,7 @@ struct ContentView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14).padding(.vertical, 9)
                 .background(.black.opacity(0.7), in: Capsule())
-                .padding(.bottom, 150)
+                .padding(.bottom, 190)
         }
         .transition(.opacity)
         .task {
@@ -1235,7 +1400,7 @@ struct ContentView: View {
             .padding(.horizontal, 14).padding(.vertical, 10)
             .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
             .padding(.horizontal, 14)
-            .padding(.top, 56)
+            .padding(.top, 64)
  
             Spacer()
         }
@@ -1296,6 +1461,15 @@ struct SettingsSheet: View {
                         set: { cam.settings.livePhotoOn = $0; cam.settings.save(); cam.reconfigure() }
                     ))
                     .disabled(!cam.supportsLivePhoto)
+
+                    // Macro giờ chỉ còn ở đây: màn hình chính đã bỏ nút bông hoa
+                    // để hàng nút chụp gọn như ảnh mẫu, nên công tắc này là lối
+                    // duy nhất để bật/tắt macro.
+                    Toggle("Macro", isOn: Binding(
+                        get: { cam.settings.macroOn },
+                        set: { cam.setMacro($0) }
+                    ))
+                    .disabled(!cam.supportsMacro)
                 }
  
                 Section {

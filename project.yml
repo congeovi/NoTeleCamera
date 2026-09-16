@@ -3,12 +3,12 @@ options:
   bundleIdPrefix: com.notelecamera
   projectFormat: xcode15_0
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "26.0"
 targets:
   NoTeleCamera:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "26.0"
     sources:
       - path: .
         excludes:
