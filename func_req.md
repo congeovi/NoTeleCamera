@@ -7,24 +7,21 @@ cấp điện**, nên OIS hỏng của nó không kêu và không lọt vào ti�
 - Yêu cầu: iOS 26+, Xcode 26+ (CI chạy macos-26 + Xcode 26.6, SDK iOS 26),
   chạy trên máy thật
 - Trạng thái: Giai đoạn 1 + 2 + 3 đã xong; giao diện đã đổi sang bố cục kiểu
-  Camera iOS 26 (Liquid Glass thật): thanh trên là cụm 3 nút canh giữa (đèn ·
-  Live Photo · tỉ lệ khung), hẹn giờ và lối vào Cài đặt nằm trong menu ba chấm ở
-  hàng nút chụp, zoom là các mốc pill, hàng dưới cùng là thumbnail tròn · pill 5
-  chế độ · nút đổi camera. Nút macro nhanh đã bỏ khỏi màn hình chính (macro chỉ
-  còn công tắc trong Cài đặt)
+  Camera iOS 26 (Liquid Glass thật): thanh trên là cụm nút canh giữa (đèn ·
+  Live Photo · tỉ lệ khung — tối đa 3 nút ở chế độ Ảnh, ít hơn ở chế độ khác),
+  hẹn giờ và lối vào Cài đặt nằm trong menu ba chấm ở hàng nút chụp, zoom là các
+  mốc pill, hàng dưới cùng là thumbnail tròn · pill 5 chế độ · nút đổi camera.
+  Nút macro nhanh đã bỏ khỏi màn hình chính (macro chỉ còn công tắc trong Cài đặt)
 ### Các file mã nguồn
  
 | File | Nội dung |
 |---|---|
 | `CaptureTypes.swift` | enum chế độ, tuỳ chọn, ghi nhớ cài đặt |
 | `CameraManager.swift` | session, ống kính, zoom, lấy nét, các chế độ ghi hình |
-| `CameraManager_Capture.swift` | chụp ảnh, ProRAW, Live Photo, chân dung |
+| `CameraManagerCapture.swift` | chụp ảnh, ProRAW, Live Photo, chân dung |
 | `MediaProcessing.swift` | xuất quay chậm, ghép tua nhanh, tiện ích ảnh |
 | `CameraUI.swift` | toàn bộ giao diện |
-| `NoTeleCameraApp.swift` | điểm vào |
- 
-⚠️ `NoTeleCamera_Phase1.swift` phải được gỡ khỏi target hoặc xoá hẳn — nó
-khai báo lại `CameraManager`, `ContentView` và một `@main` thứ hai.
+| `App.swift` | điểm vào |
  
 ---
  
@@ -78,6 +75,13 @@ Thêm vào Info.plist, thiếu là app crash:
       rồi biến mất, camera trở lại Continuous AF/AE và EV về 0
 - [x] Đang khoá AE/AF thì lia máy không làm mất khoá
 - [x] Chạm điểm mới trả EV về 0, như Camera gốc
+- [x] EV ≠ 0 thì chụp bằng `AVCapturePhotoBracketSettings` một nấc thay vì
+      đường chụp thường: `setExposureTargetBias` chỉ đổi phơi sáng CẢM BIẾN, còn
+      tầng xử lý của ISP (zero shutter lag + Smart HDR) tone-map lại về mức
+      "đúng" và xoá gần hết phần bù trừ — preview sáng lên nhưng ảnh ra thì
+      không. Giá phải trả: tấm bracket mất Live Photo, depth, flash và ProRAW;
+      `maxBracketedCapturePhotoCount == 0` thì rơi về đường cũ và báo ra chứ
+      không im lặng
 - [x] Reset EV và mở khoá khi đổi camera trước/sau
 ## 4. Năm chế độ
  
@@ -100,8 +104,11 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 ## 5. Chụp ảnh
  
 - [x] Chụp HEIF (HEVC), tự rơi về mặc định nếu máy không hỗ trợ
-- [x] `photoQualityPrioritization = .quality` — đường để iOS tự áp
-      Deep Fusion và Smart HDR cho app bên thứ ba
+- [x] `photoQualityPrioritization = .balanced` cho chụp đơn — vẫn có Deep Fusion
+      và Smart HDR, nhưng KHÔNG mở cửa cho Night mode phơi sáng dài. Với
+      `.quality` máy gom khung trong cả giây sau khi bấm, tay nhúc nhích là
+      nhoè. Luôn kẹp theo `photoOutput.maxPhotoQualityPrioritization`, đặt cao
+      hơn trần là AVFoundation ném exception
 - [x] Chụp ở `maxPhotoDimensions` của format hiện tại, đọc lại sau mỗi
       lần đổi `activeFormat`
 - [x] Khoá hướng ảnh về dọc (`videoRotationAngle = 90`)
@@ -130,6 +137,10 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
       phẳng nét ở tâm khung, dựng mask rồi `CIMaskedVariableBlur`
 - [x] Thanh trượt cường độ xoá phông 0…1
 - [x] Depth chỉ bật ở chế độ này — bật thừa sẽ giới hạn format
+- [x] `applyMode` gỡ `movieOutput` khỏi session ở chế độ Chân dung, y như cách
+      làm với Live Photo: movie output che mất `isDepthDataDeliverySupported`
+      nên nếu để nguyên thì nhánh bật depth bị bỏ qua IM LẶNG và ảnh ra y hệt
+      ảnh thường
 > Đây là bản tự dựng, không phải chế độ Chân dung của Apple. Apple còn
 > dùng phân đoạn người bằng mạng neural để bắt tóc và viền tay; ở đây chỉ
 > có depth map nên viền mềm hơn và đôi khi ăn lẹm.
@@ -139,18 +150,30 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Chỉ bật trên máy có ống siêu rộng, camera sau, chế độ Ảnh
 - [x] Bật macro = ép về 0,5× + `autoFocusRangeRestriction = .near`
 - [x] Zoom vượt 0,6× thì macro tự tắt
-- [x] Không còn nút macro nhanh trên màn hình chính (thanh trên chỉ còn 3 nút);
-      bật/tắt macro bằng công tắc "Macro" trong bảng Cài đặt
+- [x] Không còn nút macro nhanh trên màn hình chính; bật/tắt macro bằng công tắc
+      "Macro" trong bảng Cài đặt. Công tắc giữ NGUYÊN ba điều kiện của nút cũ
+      (`CameraManager.macroAvailable`: có ống siêu rộng + camera sau + chế độ
+      Ảnh) và mờ đi kèm dòng giải thích khi không thoả — chỉ dựa vào cờ năng
+      lực thì ở chế độ Video macro bật thật giữa lúc quay
+- [x] Rời chế độ Ảnh hoặc lật sang camera trước thì macro tự tắt và gỡ
+      `autoFocusRangeRestriction` — để nguyên thì mọi chế độ sau đều kẹt ở dải
+      lấy nét gần
 ## 10. Chụp liên tiếp (burst)
  
 - [x] Kéo nút chụp sang trái để bắt đầu
-- [x] Chụp liên tục cách nhau 220ms cho tới khi thả tay
+- [x] Chụp liên tục cách nhau 120ms cho tới khi thả tay, có backpressure: quá 4
+      tấm đang bay thì bỏ nhịp chứ không bắn tiếp. Bắn đều bất kể output tiêu
+      hoá kịp hay không thì khi máy nóng hoặc đang lưu ProRAW `pendingCaptures`
+      phình dần và bộ nhớ đi theo
 - [x] Đếm số ảnh đã chụp hiển thị giữa khung hình
 - [x] Burst dùng `.speed` thay vì `.quality` để bắt kịp nhịp
 ## 11. Hẹn giờ
  
 - [x] Ba mức: Tắt / 3 giây / 10 giây, chọn trong menu ba chấm (nút ba chấm có
       chấm vàng báo hiệu khi hẹn giờ đang bật)
+- [x] Mục chọn và chấm vàng chỉ hiện ở hai chế độ ảnh: `shutterTapped()` bắt
+      đầu/dừng ghi ngay ở ba chế độ quay và không ngó tới `timerOption`, nên bày
+      ra ở đó là hứa một cái đếm ngược không bao giờ chạy
 - [x] Đếm ngược số to giữa màn hình, nền mờ
 - [x] Rung nhẹ mỗi giây
 - [x] Chạm màn hình hoặc bấm lại nút chụp để huỷ
@@ -159,9 +182,13 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Ba mức chất lượng: 1080p30 / 1080p60 / 4K30
 - [x] Ép khung hình/giây nếu format hiện tại hỗ trợ
 - [x] Mic chỉ gắn vào session ngay trước khi quay và gỡ ra sau đó
+- [x] Thu stereo khi máy hỗ trợ (`multichannelAudioMode = .stereo`, iOS 18+) —
+      AVFoundation mặc định thu mono, không xin rõ ràng là không có
 - [x] Audio session chỉ chuyển `.playAndRecord` lúc quay, còn lại `.ambient`
       để không cắt nhạc người dùng đang nghe
-- [x] Đồng hồ đếm thời gian quay ở thanh trên kèm chấm đỏ
+- [x] Đồng hồ đếm thời gian quay ở thanh trên kèm chấm đỏ, lấy HIỆU thời gian
+      thật (`Date().timeIntervalSince(started)`) chứ không cộng dồn 0,1s mỗi
+      tick — Timer không bao giờ đúng nhịp nên quay càng lâu càng lệch
 - [x] Bật ổn định hình (`preferredVideoStabilizationMode = .auto`)
 - [x] Ẩn các nút không liên quan khi đang quay
 - [x] Đèn pin (torch) thay cho flash ở chế độ quay
@@ -171,7 +198,9 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Thả tay là dừng và lưu
 - [x] Movie output có sẵn trong session nên độ trễ thấp
 - [x] Nút chụp đổi hình dạng để phân biệt QuickTake với quay thường
-- [x] Tự vô hiệu khi Live Photo đang bật, kèm câu giải thích trong cài đặt
+- [x] Tự vô hiệu khi Live Photo đang bật, kèm câu giải thích trong cài đặt. Câu
+      đó nói đúng nguyên nhân — `AVCaptureMovieFileOutput` không sống chung với
+      Live Photo — chứ không đổ cho "iOS không cho"
 ## 14. Quay chậm
 
 - [x] Hai mức: 120 fps / 240 fps, có nút chuyển nhanh trên thanh trên và mục
@@ -219,6 +248,8 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Banner trượt xuống từ thanh trên, hiện loại mã và nội dung
 - [x] Mã là URL / mailto / tel → nút "Mở"; còn lại → nút sao chép
 - [x] Rung nhẹ khi bắt được mã mới
+- [x] Duyệt CẢ danh sách `metadataObjects` và lấy mã đầu tiên đọc được, không
+      chỉ phần tử `.first` — nhiều mã trong khung thì mã thật hay bị bỏ sót
 - [x] Tự nghỉ khi đang quay, bật/tắt được trong cài đặt
 ## 17. Khung hình & hỗ trợ bố cục
  
@@ -226,6 +257,10 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Nút tỉ lệ nằm ở thanh trên (chỉ hiện ở chế độ Ảnh); nhãn là tỉ lệ đang áp
       dụng thật, Live Photo hoặc ProRAW đang bật thì nút mờ đi và bấm vào chỉ
       hiện toast giải thích — lựa chọn vẫn được lưu như trước
+- [x] Quy tắc "Live Photo / ProRAW ⇒ ảnh vẫn ra 4:3" chỉ viết MỘT chỗ
+      (`CameraManager.aspectCropSkipped` + `aspectCropSkippedReason`); khung
+      preview, nút tỉ lệ và dòng nhắc trong Cài đặt đều đọc từ đó nên ba chỗ
+      không trôi khỏi nhau
 - [x] Chế độ quay luôn dùng khung 16:9 bất kể tỉ lệ đang chọn
 - [x] Khung preview khoá đúng tỉ lệ file sẽ ghi ra (`CameraManager.outputAspectRatio`):
       4:3 → khung 3:4, 16:9 và mọi chế độ quay → khung 9:16, 1:1 → khung vuông.
@@ -235,8 +270,11 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Live Photo / ProRAW đang bật thì khung preview đứng ở 4:3 cho khớp file
       (ảnh không cắt được), kèm dòng nhắc trong Cài đặt
 - [x] 4:3 lưu nguyên file gốc, giữ đủ metadata
-- [x] 16:9 và 1:1 cắt canh giữa rồi lưu JPEG 95% — chỉ khi chụp thường,
-      vì cắt sẽ phá cặp Live Photo và không áp được cho RAW
+- [x] 16:9 và 1:1 cắt canh giữa bằng `CGImageSource`/`CGImageDestination` nên
+      giữ nguyên định dạng gốc và toàn bộ EXIF (`MediaProcessing.cropPreservingMetadata`);
+      đường qua `UIImage` + JPEG 95% chỉ còn là phương án dự phòng khi cách trên
+      thất bại. Chỉ cắt khi chụp thường, vì cắt sẽ phá cặp Live Photo và không
+      áp được cho RAW
 - [x] Lưới 3×3 bật/tắt
 - [x] Thước thăng bằng chuẩn iOS 17 (1 thanh 3 đoạn, dài 180pt, chuyển vàng và tự ẩn sau khi cân bằng)
 ## 18. Camera trước
@@ -245,6 +283,14 @@ Thanh cuộn ngang: **TUA NHANH · QUAY CHẬM · VIDEO · ẢNH · CHÂN DUNG**
 - [x] Lật gương đúng cho cả ảnh lẫn video
 - [x] Tự tắt đèn khi đổi camera
 - [x] Khoá không cho đổi khi đang quay hoặc đang xuất file
+- [x] `flipCamera` gọi lại `applyMode` sau khi đổi input: preset, format, Live
+      Photo và depth đều là cấu hình của camera cũ, không áp lại là giữ nguyên
+- [x] Đọc lại `supportsDepth` / `supportsMacro` / `supportsLivePhoto` /
+      `supportsProRAW` cho camera mới (gỡ `movieOutput` ra trước khi đọc, nếu
+      không nó che mất hai cờ Live Photo và depth) — giữ giá trị của camera sau
+      sẽ làm UI hiện nút cho thứ camera trước không có
+- [x] `defaultFormat` nhận format của camera mới; giữ format cũ là `applyMode`
+      ép nhầm format lên thiết bị khác
 ## 19. Đèn
  
 - [x] Flash ba chế độ cho ảnh: tự động → bật → tắt
@@ -289,50 +335,51 @@ Lưu qua `UserDefaults`, khôi phục khi mở lại app:
       trên/dưới), nháy trắng khi bấm máy phủ cả màn hình, ẩn thanh trạng thái
 - [x] Ép chế độ tối
 - [x] Bảng cài đặt dạng sheet nửa màn hình (mở từ menu ba chấm)
-- [x] Thanh trên là cụm 3 nút canh giữa: đèn · Live Photo · tỉ lệ khung; chế độ
-      quay chậm hiện mốc fps ở chỗ nút tỉ lệ, đang quay chỉ còn nút đèn pin
-- [x] Đồng hồ quay (chấm đỏ) và huy hiệu AE/AF LOCK nằm ngay dưới cm nút thanh trên
+- [x] Thanh trên là cụm nút canh giữa: đèn · Live Photo · tỉ lệ khung. Đủ 3 nút
+      ở chế độ Ảnh trên máy có Live Photo; Chân dung và Video chỉ còn nút đèn,
+      Quay chậm là đèn + mốc fps (thay chỗ nút tỉ lệ), đang quay chỉ còn đèn pin
+- [x] Đồng hồ quay (chấm đỏ) và huy hiệu AE/AF LOCK nằm ngay dưới cụm nút thanh trên
+- [x] Nút tỉ lệ chỉ vàng khi khung đang áp KHÁC 4:3, đúng quy ước "vàng = lệch
+      khỏi mặc định" của nút đèn và nút Live Photo bên cạnh
 - [x] Hàng nút chụp: nút chụp ở chính giữa, menu ba chấm (hẹn giờ + Cài đặt) bên
-      phải, bên trái để trống vì đã bỏ nút macro
+      phải, bên trái để trống vì đã bỏ nút macro. Hai hàng dưới dùng chung một
+      lề ngang nên nút ba chấm thẳng cột với nút đổi camera
 - [x] Hàng dưới cùng: thumbnail tròn · pill 5 chế độ · nút đổi camera; pill chế độ
       cuộn ngang, mốc đang chọn có nền kính sáng hơn và khối kính trượt sang ô mới
-- [x] Toàn bộ nút và pill dùng Liquid Glass thật (`glassEffect`, `GlassEffectContainer`)
+- [x] Khoảng đệm hai đầu pill chế độ tính theo bề rộng ĐO ĐƯỢC của pill
+      (`GeometryReader`), không phải hằng số: hằng số nhỏ hơn mức cần thì
+      `scrollTo(anchor: .center)` bị kẹp ở biên nội dung và hai mốc TUA NHANH /
+      CHÂN DUNG không bao giờ canh được vào giữa
+- [x] Hàng chế độ GIỮ CHỖ khi đang quay / đang xuất file (mờ đi + khoá) chứ
+      không gỡ khỏi cây, để nút chụp không tụt xuống sát mép rồi nhảy ngược lên
+- [x] Toàn bộ nút và pill dùng Liquid Glass thật (`glassEffect`), gom trong
+      `GlassEffectContainer` ở cả ba cụm: thanh trên, hàng zoom, cụm dưới.
+      `spacing` của mỗi container đặt NHỎ hơn khoảng hở thật giữa các nút, nếu
+      không hai viên kính cạnh nhau hoà thành một cục. Kính nền của pill chế độ
+      nằm ngoài container của các mốc, vì hai mảng chồng nhau cũng bị hoà làm một
+- [x] Mốc zoom đang chọn và mốc chế độ đang chọn mang một mã hiệu `glassEffectID`
+      cố định nên khối kính TRƯỢT sang mốc mới thay vì tắt phụt rồi bật lại
 - [x] Huy hiệu xác nhận "Ống tele 77mm đã bị vô hiệu hoá" trong cài đặt
 ---
  
 ## Cần làm tiếp
  
-### A. Sửa lỗi — ưu tiên cao
- 
-| Việc | Chi tiết |
-|---|---|
-| Chân dung nhiều khả năng không chạy | `applyMode` không gỡ `movieOutput` ở chế độ `.portrait`, mà movie output làm `isDepthDataDeliverySupported` trả về false → nhánh bật depth bị bỏ qua im lặng, ảnh ra y hệt ảnh thường. Phải tráo output giống cách đang làm với Live Photo |
-| Lật camera không áp lại chế độ | `flipCamera` không gọi `applyMode`, nên preset/format/Live Photo/depth giữ nguyên của camera cũ |
-| Khả năng máy không cập nhật khi lật | `supportsDepth`, `supportsMacro`, `supportsLivePhoto`, `supportsProRAW` vẫn là giá trị đọc từ camera sau |
-| Dòng thừa trong `flipCamera` | `defaultFormat = goingFront ? newFormat : newFormat` — hai nhánh giống hệt nhau |
-| Thu âm đang là mono | Tài liệu cũ ghi "stereo" nhưng code không set `multichannelAudioMode = .stereo` trên `AVCaptureDeviceInput` |
-| Câu giải thích Live Photo trong cài đặt | Nói "iOS không cho" là không đúng — đây là giới hạn của `AVCaptureMovieFileOutput`, không phải của iOS |
-| Đồng hồ quay trôi | Cộng dồn `+= 0.1` mỗi tick Timer, sai dần khi quay lâu. Nên lấy hiệu thời gian thật |
-| Quét mã nuốt mất `metadataObjects` khác | Chỉ đọc phần tử `.first`, nhiều mã trong khung sẽ bỏ sót |
- 
-### B. Chức năng còn thiếu so với Camera gốc
+### A. Chức năng còn thiếu so với Camera gốc
  
 | Việc | Ghi chú |
 |---|---|
 | Live Photo + QuickTake cùng lúc | Bỏ `AVCaptureMovieFileOutput`, chuyển sang `AVCaptureVideoDataOutput` + `AVAssetWriter`. Đây cũng là cách gốc làm |
-| Giữ depth trong file chân dung | Lưu HEIC kèm depth aux thay vì nung mờ cứng vào JPEG, để app Ảnh chỉnh lại khẩu độ sau |
-| Cắt tỉ lệ không mất metadata | Hiện đi qua `UIImage` nên rụng hết EXIF và tụt xuống JPEG. Nên cắt trên `CGImageDestination` và giữ HEIF |
+| Giữ depth trong file chân dung | Lưu HEIC kèm depth aux thay vì nung mờ cứng vào ảnh, để app Ảnh chỉnh lại khẩu độ sau |
 | 4K60 và 4K24 | 13 Pro có, bảng `VideoQuality` chưa liệt kê |
 | Chụp ảnh trong lúc quay video | Thêm `AVCapturePhotoOutput` vào cùng session lúc quay |
-| Hiệu ứng chớp màn hình lúc chụp | Gốc có, ở đây chỉ có nút co lại |
-| Burst nhanh hơn và gom stack | 220ms ≈ 4,5 ảnh/giây, gốc ~10; ảnh cũng chưa gom thành burst |
+| Gom burst thành stack | Ảnh burst hiện lưu rời từng tấm, gốc gom thành một stack trong app Ảnh |
 | Tua nhanh tự giãn nhịp | Gốc giãn nhịp theo độ dài quay nên quay 1 tiếng vẫn ra video ngắn |
 | Macro tự chuyển khi lại gần | Gốc tự đổi sang siêu rộng theo khoảng lấy nét |
 | Live Text | `VNRecognizeTextRequest` trên khung preview |
 | ProRes | `AVCaptureMovieFileOutput` hỗ trợ trên 13 Pro |
-| Action mode | Cần iOS 16+ và `isCenterStageEnabled`-tương đương; kiểm tra API trước |
+| Action mode | Kiểm tra API trước khi làm |
  
-### C. Không làm được — Apple không mở API
+### B. Không làm được — Apple không mở API
  
 - Photographic Styles
 - Night mode (độc quyền app Camera của Apple)

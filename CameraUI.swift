@@ -844,20 +844,26 @@ struct ContentView: View {
  
     // MARK: Thanh trên
  
-    /// Cụm nút giữa thanh trên: đèn · Live Photo · tỉ lệ khung — đúng 3 nút như
-    /// ảnh mẫu. Nút hẹn giờ và lối vào Cài đặt đã dời xuống `menuButton` (menu
-    /// ba chấm) ở hàng nút chụp, nên thanh trên chỉ còn việc của camera.
+    /// Cụm nút giữa thanh trên: đèn · Live Photo · tỉ lệ khung. Đủ 3 nút ở chế
+    /// độ Ảnh trên máy có Live Photo; Chân dung và Video chỉ còn nút đèn, Quay
+    /// chậm là đèn + mốc fps. Nút hẹn giờ và lối vào Cài đặt đã dời xuống
+    /// `menuButton` ở hàng nút chụp, nên thanh trên chỉ còn việc của camera.
     private var topBar: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 26) {
-                lightButton
- 
-                if !cam.isRecording {
-                    if cam.settings.mode == .slomo {
-                        slomoRateButton
-                    } else if cam.settings.mode == .photo {
-                        if cam.supportsLivePhoto { livePhotoButton }
-                        aspectButton
+            // Container riêng cho cụm nút trên: các mảng kính cạnh nhau được
+            // gộp thành một lượt render. spacing 12 < khoảng cách thật 26 nên
+            // ba nút vẫn là ba viên tách bạch, không dính thành một khối.
+            GlassEffectContainer(spacing: 12) {
+                HStack(spacing: 26) {
+                    lightButton
+
+                    if !cam.isRecording {
+                        if cam.settings.mode == .slomo {
+                            slomoRateButton
+                        } else if cam.settings.mode == .photo {
+                            if cam.supportsLivePhoto { livePhotoButton }
+                            aspectButton
+                        }
                     }
                 }
             }
@@ -914,17 +920,24 @@ struct ContentView: View {
         .glassEffect(.regular.tint(.yellow).interactive(true), in: Capsule())
     }
  
+    /// Hẹn giờ chỉ có tác dụng ở hai chế độ ảnh: `CameraManager.shutterTapped()`
+    /// bắt đầu/dừng ghi ngay và không ngó tới `timerOption` ở ba chế độ quay.
+    /// Nên ở chế độ quay thì không hiện mục chọn, và cũng không sáng chấm vàng
+    /// — bản trước bày ra cả hai, hứa một cái đếm ngược không bao giờ chạy.
+    private var timerApplies: Bool { !cam.settings.mode.isRecordingMode }
+
     /// Menu ba chấm ở hàng nút chụp: chứa hẹn giờ và lối vào Cài đặt. Thanh trên
-    /// chỉ còn 3 nút nên hai thứ đó phải ở đây, đúng như ảnh mẫu.
+    /// chỉ còn cụm nút camera nên hai thứ đó phải ở đây, đúng như ảnh mẫu.
     private var menuButton: some View {
-        Menu {
-            Picker("Hẹn giờ", selection: Binding(
-                get: { cam.settings.timerOption },
-                set: { cam.settings.timerOption = $0; cam.settings.save() }
-            )) {
-                Text("Tắt").tag(TimerOption.off)
-                Text("3 giây").tag(TimerOption.three)
-                Text("10 giây").tag(TimerOption.ten)
+        let timerOn = timerApplies && cam.settings.timerOption != .off
+        return Menu {
+            if timerApplies {
+                Picker("Hẹn giờ", selection: Binding(
+                    get: { cam.settings.timerOption },
+                    set: { cam.settings.timerOption = $0; cam.settings.save() }
+                )) {
+                    ForEach(TimerOption.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
             }
 
             Button { showSettings = true } label: {
@@ -933,12 +946,12 @@ struct ContentView: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(cam.settings.timerOption == .off ? .white : .yellow)
+                .foregroundStyle(timerOn ? .yellow : .white)
                 .frame(width: 46, height: 46)
                 .overlay(alignment: .topTrailing) {
                     // Hẹn giờ giờ nằm trong menu nên phải có chấm vàng báo hiệu,
                     // không thì bấm máy xong mới giật mình thấy đếm ngược.
-                    if cam.settings.timerOption != .off {
+                    if timerOn {
                         Circle().fill(.yellow)
                             .frame(width: 9, height: 9)
                             .overlay(Circle().stroke(.black.opacity(0.45), lineWidth: 1))
@@ -949,51 +962,41 @@ struct ContentView: View {
         .glassEffect(.regular.interactive(true), in: Circle())
     }
 
+    /// Khung THẬT SỰ sẽ ghi ra file. Live Photo và ProRAW không cắt được nên
+    /// ảnh vẫn ra 4:3 dù người dùng chọn khung khác — quy tắc nằm một chỗ ở
+    /// `CameraManager.aspectCropSkipped`, đây chỉ đọc lại.
+    private var effectiveAspect: AspectRatio {
+        cam.aspectCropSkipped ? .r4x3 : cam.settings.aspect
+    }
+
     /// Nút tỉ lệ khung: xoay vòng 4:3 → 16:9 → 1:1. Nhãn hiện khung đang áp dụng
-    /// (xem `CameraManager.outputAspectRatio`), nên khi Live Photo hoặc
-    /// ProRAW đang giữ ảnh ở 4:3 thì nút mờ đi và bấm vào chỉ báo lý do — không
-    /// hứa hão một khung mà file sẽ không có.
+    /// thật, nên khi Live Photo hoặc ProRAW đang giữ ảnh ở 4:3 thì nút mờ đi và
+    /// bấm vào chỉ báo lý do — không hứa hão một khung mà file sẽ không có.
+    ///
+    /// Vàng = đang lệch khỏi mặc định, đúng quy ước của nút đèn và nút Live
+    /// Photo bên cạnh. 4:3 là mặc định nên để trắng.
     private var aspectButton: some View {
-        Button {
+        let locked = cam.aspectCropSkipped
+        let isDefault = effectiveAspect == .r4x3
+        return Button {
             let all = AspectRatio.allCases
             let idx = all.firstIndex(of: cam.settings.aspect) ?? 0
             cam.settings.aspect = all[(idx + 1) % all.count]
             cam.settings.save()
             // Lựa chọn vẫn được lưu như trước; chỉ nói thêm vì sao chưa thấy
             // khung đổi — trước đây phải mở Cài đặt mới đọc được dòng nhắc này.
-            if aspectLocked { cam.statusMessage = aspectLockMessage }
+            if let reason = cam.aspectCropSkippedReason { cam.statusMessage = reason }
         } label: {
-            Text(effectiveAspectLabel)
+            Text(effectiveAspect.rawValue)
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
-                .foregroundStyle(aspectLocked ? .white : .yellow)
+                .foregroundStyle(isDefault ? .white : .yellow)
                 .frame(width: 48, height: 46)
                 .contentShape(Circle())
         }
-        .opacity(aspectLocked ? 0.5 : 1)
-        .glassEffect(aspectLocked ? Glass.regular.interactive(true)
-                                  : Glass.regular.tint(.yellow.opacity(0.55)).interactive(true),
+        .opacity(locked ? 0.5 : 1)
+        .glassEffect(isDefault ? Glass.regular.interactive(true)
+                               : Glass.regular.tint(.yellow.opacity(0.55)).interactive(true),
                      in: Circle())
-    }
-
-    /// Ảnh có bị cắt theo khung đang chọn không. Live Photo và ProRAW không cắt
-    /// được (xem `savePhoto` trong CameraManagerCapture) nên cả hai đều khoá ở
-    /// 4:3 — khớp với dòng nhắc trong bảng Cài đặt.
-    private var aspectLocked: Bool {
-        guard cam.settings.mode == .photo else { return false }
-        if cam.settings.livePhotoOn && cam.supportsLivePhoto { return true }
-        if cam.settings.photoFormat == .proRAW && cam.supportsProRAW { return true }
-        return false
-    }
-
-    private var aspectLockMessage: String {
-        if cam.settings.livePhotoOn && cam.supportsLivePhoto {
-            return "Live Photo đang bật nên ảnh vẫn lưu ở 4:3; khung vừa chọn sẽ áp sau khi tắt Live Photo."
-        }
-        return "ProRAW đang bật nên ảnh vẫn lưu ở 4:3; chuyển định dạng về HEIF nếu muốn khung khác."
-    }
-
-    private var effectiveAspectLabel: String {
-        aspectLocked ? AspectRatio.r4x3.rawValue : cam.settings.aspect.rawValue
     }
  
     private var livePhotoButton: some View {
@@ -1054,9 +1057,12 @@ struct ContentView: View {
 
             flipButton
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 6)
+        .padding(.horizontal, Self.bottomRowInset)
     }
+
+    /// Lề ngang dùng chung cho hàng nút chụp và hàng chế độ, để nút ba chấm nằm
+    /// thẳng cột với nút đổi camera ngay dưới nó.
+    private static let bottomRowInset: CGFloat = 20
  
     private var usesTorch: Bool { cam.settings.mode.isRecordingMode }
  
@@ -1091,27 +1097,42 @@ struct ContentView: View {
                     .disabled(cam.isRecording || cam.isProcessing)
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 10)
+        .padding(.horizontal, Self.bottomRowInset)
     }
 
-    /// Bọc hàng nút chụp và hàng chế độ trong một khung kính chung: các mảng
-    /// kính gần nhau sẽ tự hoà vào nhau, đúng kiểu iOS 26.
+    /// Bọc hàng nút chụp và hàng chế độ trong một khung kính chung để iOS gộp
+    /// một lượt render.
+    ///
+    /// `spacing` phải NHỎ hơn khoảng hở thật giữa nút ba chấm và nút đổi camera
+    /// ngay dưới nó, nếu không hai viên kính hoà thành một cục dọc. Khoảng hở
+    /// đó = (74 − 46)/2 + `VStack.spacing` = 14 + 12 = 26pt, nên 10 là an toàn.
+    ///
+    /// `modeRow` được GIỮ CHỖ chứ không gỡ khỏi cây khi đang quay: gỡ hẳn thì
+    /// nút chụp tụt xuống sát mép safe area rồi nhảy ngược lên lúc quay xong.
     private var bottomCluster: some View {
-        GlassEffectContainer(spacing: 18) {
-            VStack(spacing: 4) {
+        let hideModeRow = cam.isRecording || cam.isProcessing
+        return GlassEffectContainer(spacing: 10) {
+            VStack(spacing: 12) {
                 shutterRow
 
-                if !cam.isRecording && !cam.isProcessing {
-                    modeRow
-                }
+                modeRow
+                    .opacity(hideModeRow ? 0 : 1)
+                    .disabled(hideModeRow)
+                    .animation(.easeOut(duration: 0.2), value: hideModeRow)
             }
         }
+        .padding(.top, 10)
+        .padding(.bottom, 10)
     }
- 
+
+    /// Chỉ mốc đang chọn có mảng kính thật, nhưng vẫn bọc container: mốc sáng
+    /// mang một mã hiệu cố định nên nó TRƯỢT sang mốc mới khi đổi zoom, giống
+    /// khối sáng của pill chế độ.
     private var zoomSelector: some View {
-        HStack(spacing: 8) {
-            ForEach(cam.zoomStops, id: \.self) { zoomButton($0) }
+        GlassEffectContainer(spacing: 0) {
+            HStack(spacing: 8) {
+                ForEach(cam.zoomStops, id: \.self) { zoomButton($0) }
+            }
         }
         .padding(.bottom, 12)
     }
@@ -1135,7 +1156,11 @@ struct ContentView: View {
         .glassEffect(active ? Glass.regular.tint(.black.opacity(0.5)).interactive(true)
                             : Glass.identity,
                      in: Capsule())
+        .glassEffectID(active ? Self.zoomHighlightID : "zoom-\(value)", in: glassNamespace)
     }
+
+    /// Mã hiệu cố định của mảng kính "mốc zoom đang chọn" (xem `zoomButton`).
+    private static let zoomHighlightID = "zoom-highlight"
  
     private var portraitSlider: some View {
         HStack(spacing: 10) {
@@ -1160,52 +1185,77 @@ struct ContentView: View {
     /// kính sáng hơn + chữ vàng. Giữ nguyên hành vi cũ: tự canh giữa mốc đang
     /// chọn dù đổi bằng nút hay bằng cú vuốt ngang trên khung ngắm.
     private var modeSelector: some View {
-        ScrollViewReader { proxy in
+        // Bề rộng pill phải đo được thì mới tính nổi khoảng đệm hai đầu: hằng số
+        // cũ (56pt) nhỏ hơn mức cần (~77pt ở iPhone 13 Pro) nên `scrollTo` bị
+        // kẹp ở biên nội dung và hai mốc TUA NHANH / CHÂN DUNG không bao giờ
+        // canh được vào giữa.
+        GeometryReader { geo in
+            modePill(width: geo.size.width)
+        }
+        .frame(height: 40)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func modePill(width: CGFloat) -> some View {
+        // Nửa bề rộng pill luôn ĐỦ để canh giữa mốc đầu và mốc cuối, dù nhãn dài
+        // ngắn thế nào: mốc rộng tối đa bằng pill, nên cần nhiều nhất là
+        // (pill − mốc)/2 ≤ pill/2. Dư ra chỉ là khoảng trống cuộn được, vô hại.
+        let inset = max(width / 2, 0)
+
+        return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 4) {
-                    // Hai khoảng đệm trong suốt để mốc đầu và mốc cuối vẫn canh
-                    // được vào giữa pill — cuộn không bị kẹp ở hai đầu.
-                    Color.clear.frame(width: Self.modePillInset)
+                // Container CHỈ bọc các mốc. Kính nền của pill nằm ngoài, nếu
+                // để chung thì hai mảng chồng nhau bị hoà làm một cục kính dày
+                // thay vì "khối sáng trượt trên đường ray".
+                GlassEffectContainer(spacing: 0) {
+                    HStack(spacing: 4) {
+                        // Hai khoảng đệm trong suốt để mốc đầu và mốc cuối vẫn canh
+                        // được vào giữa pill — cuộn không bị kẹp ở hai đầu.
+                        Color.clear.frame(width: inset)
 
-                    ForEach(CaptureMode.ordered) { m in
-                        Button {
-                            if m == cam.settings.mode {
-                                // Bấm lại chế độ đang chọn không đổi gì, nhưng
-                                // vẫn canh giữa lại thanh — như bản cũ làm.
-                                withAnimation(.easeOut(duration: 0.25)) {
-                                    proxy.scrollTo(m.id, anchor: .center)
+                        ForEach(CaptureMode.ordered) { m in
+                            Button {
+                                if m == cam.settings.mode {
+                                    // Bấm lại chế độ đang chọn không đổi gì, nhưng
+                                    // vẫn canh giữa lại thanh — như bản cũ làm.
+                                    withAnimation(.easeOut(duration: 0.25)) {
+                                        proxy.scrollTo(m.id, anchor: .center)
+                                    }
+                                } else {
+                                    applyModeSelection(m)
                                 }
-                            } else {
-                                applyModeSelection(m)
+                            } label: {
+                                Text(m.label)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.75))
+                                    .padding(.horizontal, 10)
+                                    .frame(height: 32)
+                                    .contentShape(Capsule())
                             }
-                        } label: {
-                            Text(m.label)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.75))
-                                .padding(.horizontal, 10)
-                                .frame(height: 32)
-                                .contentShape(Capsule())
+                            .id(m.id)
+                            // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
+                            // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
+                            // tắt phụt rồi bật lại — GlassEffectContainer lo phần
+                            // morph. Mốc không chọn dùng Glass.identity nên không
+                            // sinh thêm mảng kính nào.
+                            .glassEffect(cam.settings.mode == m
+                                         ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
+                                         : Glass.identity,
+                                         in: Capsule())
+                            .glassEffectID(cam.settings.mode == m ? Self.modeHighlightID : m.id,
+                                           in: glassNamespace)
                         }
-                        .id(m.id)
-                        // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
-                        // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
-                        // tắt phụt rồi bật lại — GlassEffectContainer lo phần
-                        // morph. Mốc không chọn dùng Glass.identity nên không
-                        // sinh thêm mảng kính nào.
-                        .glassEffect(cam.settings.mode == m
-                                     ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
-                                     : Glass.identity,
-                                     in: Capsule())
-                        .glassEffectID(cam.settings.mode == m ? Self.modeHighlightID : m.id,
-                                       in: glassNamespace)
-                    }
 
-                    Color.clear.frame(width: Self.modePillInset)
+                        Color.clear.frame(width: inset)
+                    }
                 }
                 .padding(.horizontal, 4)
                 .padding(.vertical, 4)
             }
             .frame(height: 40)
+            // ScrollView clip theo hình chữ nhật, không theo capsule của kính —
+            // thiếu dòng này thì chữ của mốc đầu/cuối tràn ra ngoài hai đầu bo.
+            .clipShape(Capsule())
             .glassEffect(.regular, in: Capsule())
             .onAppear { proxy.scrollTo(cam.settings.mode.id, anchor: .center) }
             // Chế độ có thể đổi từ nút bấm hoặc từ cú vuốt ngang trên khung
@@ -1215,12 +1265,7 @@ struct ContentView: View {
                 withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(m.id, anchor: .center) }
             }
         }
-        .frame(maxWidth: .infinity)
     }
-
-    /// Bề rộng khoảng đệm trong suốt ở hai đầu pill chế độ. Pill hẹp hơn màn
-    /// hình nên con số này chỉ cần đủ để cuộn tới được mốc đầu và mốc cuối.
-    private static let modePillInset: CGFloat = 56
 
     /// Mã hiệu cố định của mảng kính "mốc chế độ đang chọn" (xem `modeSelector`).
     private static let modeHighlightID = "mode-highlight"
@@ -1249,10 +1294,10 @@ struct ContentView: View {
             .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
             .contentShape(Circle())
         }
-        .opacity(cam.isRecording ? 0 : 1)
-        .disabled(cam.isRecording)
     }
 
+    // Cả hai nút không cần tự ẩn / tự khoá khi đang quay hoặc đang xuất file:
+    // `bottomCluster` đã làm việc đó cho cả `modeRow`.
     private var flipButton: some View {
         Button {
             cam.flipCamera()
@@ -1264,8 +1309,6 @@ struct ContentView: View {
                 .contentShape(Circle())
         }
         .glassEffect(.regular.interactive(true), in: Circle())
-        .opacity(cam.isRecording ? 0 : 1)
-        .disabled(cam.isRecording || cam.isProcessing)
     }
  
     private var shutterButton: some View {
@@ -1419,21 +1462,6 @@ struct SettingsSheet: View {
     @ObservedObject var cam: CameraManager
     @Binding var isPresented: Bool
 
-    /// Live Photo / ProRAW đang bật thì `savePhoto` bỏ qua bước cắt tỉ lệ, nên
-    /// ảnh vẫn ra 4:3 dù người dùng chọn khung khác — khung preview cũng đứng ở
-    /// 4:3 theo (xem `CameraManager.outputAspectRatio`). Phải nói ra, không thì
-    /// người dùng tưởng chức năng đổi tỉ lệ hỏng.
-    private var cropSkippedNotice: String? {
-        guard cam.settings.aspect != .r4x3, cam.settings.mode == .photo else { return nil }
-        if cam.settings.livePhotoOn, cam.supportsLivePhoto {
-            return "Live Photo đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ sẽ phá cặp Live Photo. Tắt Live Photo nếu muốn khung \(cam.settings.aspect.rawValue)."
-        }
-        if cam.settings.photoFormat == .proRAW, cam.supportsProRAW {
-            return "ProRAW đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ không áp được cho RAW. Chuyển định dạng về HEIF nếu muốn khung \(cam.settings.aspect.rawValue)."
-        }
-        return nil
-    }
- 
     var body: some View {
         NavigationStack {
             Form {
@@ -1464,14 +1492,16 @@ struct SettingsSheet: View {
 
                     // Macro giờ chỉ còn ở đây: màn hình chính đã bỏ nút bông hoa
                     // để hàng nút chụp gọn như ảnh mẫu, nên công tắc này là lối
-                    // duy nhất để bật/tắt macro.
+                    // duy nhất để bật/tắt macro. Điều kiện bật vẫn y như nút cũ
+                    // (§9) — `macroAvailable` giữ cả ba vế, không chỉ mỗi cờ
+                    // năng lực.
                     Toggle("Macro", isOn: Binding(
                         get: { cam.settings.macroOn },
                         set: { cam.setMacro($0) }
                     ))
-                    .disabled(!cam.supportsMacro)
+                    .disabled(!cam.macroAvailable)
                 }
- 
+
                 Section {
                     EmptyView()
                 } footer: {
@@ -1479,7 +1509,12 @@ struct SettingsSheet: View {
                         Text("Live Photo và đường quay video của app hiện chưa dùng chung được, nên khi Live Photo bật thì QuickTake (giữ nút chụp để quay) tạm nghỉ; tắt Live Photo là QuickTake có lại.")
                         // Khung preview đứng ở 4:3 đúng như file sẽ lưu, nói ra để
                         // không tưởng chức năng đổi tỉ lệ hỏng.
-                        if let notice = cropSkippedNotice { Text(notice) }
+                        if let notice = cam.aspectCropSkippedReason { Text(notice) }
+                        // Công tắc macro mờ đi khá dễ gặp (đang quay, đang dùng
+                        // camera trước), nói lý do ngay cạnh nó.
+                        if cam.supportsMacro && !cam.macroAvailable {
+                            Text("Macro chỉ bật được ở chế độ Ảnh với camera sau.")
+                        }
                     }
                 }
  

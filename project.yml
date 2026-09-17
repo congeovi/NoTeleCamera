@@ -1,6 +1,10 @@
 name: NoTeleCamera
 options:
   bundleIdPrefix: com.notelecamera
+  # Đây là `compatibilityVersion` của file .pbxproj, KHÔNG phải phiên bản Xcode
+  # dùng để build. Xcode 26 đọc và build bình thường định dạng này; để nguyên
+  # thì file project cũng mở được bằng Xcode cũ hơn. Cái quyết định SDK là
+  # `deploymentTarget` bên dưới cộng với bản Xcode mà CI chọn.
   projectFormat: xcode15_0
   deploymentTarget:
     iOS: "26.0"

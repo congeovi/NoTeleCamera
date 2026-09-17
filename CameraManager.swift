@@ -647,6 +647,15 @@ final class CameraManager: NSObject, ObservableObject {
         quickTakeAvailable = !wantsLive
         // Rời quay chậm thì mức fps đã đo được không còn ý nghĩa.
         if mode != .slomo { activeSlomoFps = nil }
+
+        // Macro chỉ sống ở chế độ Ảnh, camera sau. Rời khỏi đó mà không tắt thì
+        // `autoFocusRangeRestriction = .near` còn nguyên trên device và mọi chế
+        // độ sau đều lấy nét ở dải gần — nhìn như camera hỏng lấy nét.
+        if settings.macroOn && (mode != .photo || front) {
+            settings.macroOn = false
+            settings.save()
+            applyMacroIfNeeded()
+        }
  
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -939,6 +948,11 @@ final class CameraManager: NSObject, ObservableObject {
     /// 13 Pro chụp macro bằng ống siêu rộng lấy nét gần.
     /// Bật macro = ép về 0,5× và giới hạn dải lấy nét về phía gần.
     func setMacro(_ on: Bool) {
+        // Tắt thì luôn cho qua (setZoom gọi vào đây để huỷ macro khi zoom ra).
+        // Bật thì phải đúng chỗ — xem `macroAvailable`. Công tắc trong Cài đặt
+        // là lối duy nhất còn lại để bật macro, nên chốt chặn phải ở đây chứ
+        // không chỉ ở điều kiện hiển thị của UI.
+        guard !on || macroAvailable else { return }
         settings.macroOn = on
         settings.save()
         if on { setZoom(0.5) }
@@ -946,8 +960,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
  
     private func applyMacroIfNeeded() {
-        guard let device, supportsMacro else { return }
-        let on = settings.macroOn && !isFront
+        // Không chặn theo `supportsMacro`: đường TẮT cũng đi qua đây, mà máy
+        // không hỗ trợ macro thì cũng phải gỡ được `.near` nếu nó đã bị đặt.
+        guard let device else { return }
+        let on = settings.macroOn && macroAvailable
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
             if device.isAutoFocusRangeRestrictionSupported {
@@ -1087,11 +1103,41 @@ final class CameraManager: NSObject, ObservableObject {
     ///    khác — preview phải đứng cùng chỗ với file, đừng hứa hão.
     var outputAspectRatio: CGFloat {
         if settings.mode.isRecordingMode { return 9.0 / 16.0 }
-        if settings.mode == .photo {
-            if settings.livePhotoOn, supportsLivePhoto { return 3.0 / 4.0 }
-            if settings.photoFormat == .proRAW, supportsProRAW { return 3.0 / 4.0 }
-        }
+        if aspectCropSkipped { return 3.0 / 4.0 }
         return settings.aspect.value
+    }
+
+    /// `savePhoto` có bỏ qua bước cắt tỉ lệ không — nguồn sự thật DUY NHẤT cho
+    /// quy tắc "Live Photo / ProRAW ⇒ ảnh vẫn ra 4:3". Khung preview, nút tỉ lệ
+    /// trên thanh trên và dòng nhắc trong Cài đặt đều đọc từ đây, để ba chỗ
+    /// không trôi khỏi nhau.
+    var aspectCropSkipped: Bool {
+        guard settings.mode == .photo else { return false }
+        if settings.livePhotoOn, supportsLivePhoto { return true }
+        if settings.photoFormat == .proRAW, supportsProRAW { return true }
+        return false
+    }
+
+    /// Vì sao khung đang chọn chưa áp được — `nil` khi khung đang chọn đúng là
+    /// khung file sẽ ghi ra (kể cả trường hợp bị khoá nhưng vốn đã chọn 4:3).
+    var aspectCropSkippedReason: String? {
+        guard aspectCropSkipped, settings.aspect != .r4x3 else { return nil }
+        if settings.livePhotoOn, supportsLivePhoto {
+            return "Live Photo đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ sẽ phá cặp Live Photo. Tắt Live Photo nếu muốn khung \(settings.aspect.rawValue)."
+        }
+        return "ProRAW đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ không áp được cho RAW. Chuyển định dạng về HEIF nếu muốn khung \(settings.aspect.rawValue)."
+    }
+
+    /// Macro chỉ có nghĩa ở ống siêu rộng của camera sau, chế độ Ảnh (§9).
+    ///
+    /// Phải kiểm cả `mode`, không chỉ `supportsMacro`. `supportsMacro` là năng
+    /// lực của DEVICE: ở Video và Tua nhanh vẫn là thiết bị kép nên nó còn
+    /// `true`, và chỉ dựa vào nó thì macro bật thật giữa lúc quay. Ở Quay chậm
+    /// thì device có được tráo sang ống 1× và cờ được đọc lại, nhưng phải chờ
+    /// hết vòng cấu hình bất đồng bộ của `applyMode` — trong khoảng đó cờ vẫn
+    /// là giá trị cũ.
+    var macroAvailable: Bool {
+        supportsMacro && !isFront && settings.mode == .photo
     }
 
     // MARK: - Lấy nét & phơi sáng

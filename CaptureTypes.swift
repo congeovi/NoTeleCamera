@@ -53,6 +53,14 @@ enum AspectRatio: String, CaseIterable {
  
 enum TimerOption: Int, CaseIterable {
     case off = 0, three = 3, ten = 10
+
+    var label: String {
+        switch self {
+        case .off: "Tắt"
+        case .three: "3 giây"
+        case .ten: "10 giây"
+        }
+    }
 }
  
 // MARK: - Chất lượng video
