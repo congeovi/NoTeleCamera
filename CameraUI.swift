@@ -750,14 +750,16 @@ struct ContentView: View {
     /// hành vi nhau. Đây cũng là NƠI DUY NHẤT giữ điều kiện được phép đổi, các
     /// chỗ gọi chỉ đọc kết quả trả về chứ đừng kiểm lại.
     ///
-    /// Chặn thêm `isBursting`: đang chụp liên tiếp mà dựng lại session thì mẻ
-    /// ảnh đang chạy bị mất cấu hình giữa chừng.
+    /// Điều kiện được phép đổi nằm ở `CameraManager.canPerform(.changeMode)`,
+    /// không chép lại ở đây: chép là có hai bản luật, và bản ở UI sẽ trôi khỏi
+    /// bản ở manager ngay lần sửa cổng tiếp theo.
     ///
-    /// - Returns: `true` nếu chế độ thật sự đổi.
+    /// - Returns: `true` nếu yêu cầu đổi chế độ được nhận. Đang có một lần
+    ///   chuyển chạy dở thì manager giữ nó lại làm `pendingMode` và áp ngay khi
+    ///   xong — vẫn tính là nhận.
     @discardableResult
     private func applyModeSelection(_ m: CaptureMode) -> Bool {
-        guard m != cam.settings.mode, !cam.isRecording, !cam.isProcessing,
-              !cam.isBursting else { return false }
+        guard m != cam.settings.mode, cam.canPerform(.changeMode) else { return false }
         freezePreviewForModeSwitch()
         withAnimation(.easeOut(duration: 0.2)) { cam.setMode(m) }
         return true
@@ -1157,6 +1159,7 @@ struct ContentView: View {
                             : Glass.identity,
                      in: Capsule())
         .glassEffectID(active ? Self.zoomHighlightID : "zoom-\(value)", in: glassNamespace)
+        .disabled(!cam.canPerform(.zoom))
     }
 
     /// Mã hiệu cố định của mảng kính "mốc zoom đang chọn" (xem `zoomButton`).
@@ -1309,6 +1312,12 @@ struct ContentView: View {
                 .contentShape(Circle())
         }
         .glassEffect(.regular.interactive(true), in: Circle())
+        // CameraManager.flipCamera() tự gác cổng này rồi, nhưng disable ở đây
+        // để không có khoảng bấm-mà-không-thấy-gì-xảy-ra. Hỏi thẳng cùng một
+        // cổng thay vì đọc `isModeTransitioning`: cổng còn chặn cả lúc đang
+        // chụp liên tiếp, mà lớp mờ thì không.
+        .disabled(!cam.canPerform(.flip))
+        .opacity(cam.canPerform(.flip) ? 1 : 0.4)
     }
  
     private var shutterButton: some View {
@@ -1336,7 +1345,7 @@ struct ContentView: View {
             // Kéo sang trái → chụp liên tiếp.
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
-                    guard !cam.isProcessing else { return }
+                    guard !cam.isProcessing, cam.canPerform(.shutter) else { return }
                     if value.translation.width < -25 {
                         shutterDrag = max(value.translation.width, -70)
                         if !cam.isBursting && !cam.isRecording { cam.burstBegan() }
@@ -1350,13 +1359,20 @@ struct ContentView: View {
                     } else if cam.isQuickTake && cam.isRecording {
                         cam.shutterHoldEnded()
                     } else if abs(value.translation.width) < 12 && abs(value.translation.height) < 12 {
+                        // cam.shutterTapped() tự gác cổng canPerform(.shutter);
+                        // vẫn gọi thẳng ở đây, không thêm điều kiện — dừng quay
+                        // (isRecording) phải luôn bấm được kể cả khi một cờ
+                        // khác đang dở dang.
                         cam.shutterTapped()
                     }
                 }
         )
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.45)
-                .onEnded { _ in cam.shutterHoldBegan() }
+                .onEnded { _ in
+                    guard cam.canPerform(.quickTake) else { return }
+                    cam.shutterHoldBegan()
+                }
         )
     }
  
