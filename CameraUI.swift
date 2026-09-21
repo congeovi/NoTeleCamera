@@ -1218,7 +1218,8 @@ struct ContentView: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(isSelected ? .yellow : .white.opacity(0.78))
                 .padding(.horizontal, 14)
-                .frame(minWidth: 64, height: 40)
+                .frame(minWidth: 64)
+                .frame(height: 40)
                 .contentShape(Capsule())
         }
         .id(m.id)
