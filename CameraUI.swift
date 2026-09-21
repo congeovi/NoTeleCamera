@@ -1195,6 +1195,46 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private func selectMode(_ m: CaptureMode) {
+        if m == cam.settings.mode {
+            // Bấm lại chế độ đang chọn vẫn đưa nó về đúng tâm.
+            withAnimation(.easeOut(duration: 0.25)) {
+                modeScrollTarget = m.id
+            }
+        } else if applyModeSelection(m) {
+            withAnimation(.easeOut(duration: 0.25)) {
+                modeScrollTarget = m.id
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func modeButton(for m: CaptureMode) -> some View {
+        let isSelected = (cam.settings.mode == m)
+        Button {
+            selectMode(m)
+        } label: {
+            Text(m.label)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isSelected ? .yellow : .white.opacity(0.78))
+                .padding(.horizontal, 14)
+                .frame(minWidth: 64, height: 40)
+                .contentShape(Capsule())
+        }
+        .id(m.id)
+        // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
+        // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
+        // tắt phụt rồi bật lại — GlassEffectContainer lo phần
+        // morph. Mốc không chọn dùng Glass.identity nên không
+        // sinh thêm mảng kính nào.
+        .glassEffect(isSelected
+                     ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
+                     : Glass.identity,
+                     in: Capsule())
+        .glassEffectID(isSelected ? Self.modeHighlightID : m.id,
+                       in: glassNamespace)
+    }
+
     private func modePill(width: CGFloat) -> some View {
         // Nửa bề rộng pill luôn ĐỦ để canh giữa mốc đầu và mốc cuối, dù nhãn dài
         // ngắn thế nào: mốc rộng tối đa bằng pill, nên cần nhiều nhất là
@@ -1208,37 +1248,7 @@ struct ContentView: View {
             GlassEffectContainer(spacing: 0) {
                 HStack(spacing: 6) {
                     ForEach(CaptureMode.ordered) { m in
-                        Button {
-                            if m == cam.settings.mode {
-                                // Bấm lại chế độ đang chọn vẫn đưa nó về đúng tâm.
-                                withAnimation(.easeOut(duration: 0.25)) {
-                                    modeScrollTarget = m.id
-                                }
-                            } else if applyModeSelection(m) {
-                                withAnimation(.easeOut(duration: 0.25)) {
-                                    modeScrollTarget = m.id
-                                }
-                            }
-                        } label: {
-                            Text(m.label)
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.78))
-                                .padding(.horizontal, 14)
-                                .frame(minWidth: 64, height: 40)
-                                .contentShape(Capsule())
-                        }
-                        .id(m.id)
-                        // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
-                        // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
-                        // tắt phụt rồi bật lại — GlassEffectContainer lo phần
-                        // morph. Mốc không chọn dùng Glass.identity nên không
-                        // sinh thêm mảng kính nào.
-                        .glassEffect(cam.settings.mode == m
-                                     ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
-                                     : Glass.identity,
-                                     in: Capsule())
-                        .glassEffectID(cam.settings.mode == m ? Self.modeHighlightID : m.id,
-                                       in: glassNamespace)
+                        modeButton(for: m)
                     }
                 }
                 .scrollTargetLayout()
@@ -1293,6 +1303,26 @@ struct ContentView: View {
  
     // MARK: Thanh dưới
  
+    @ViewBuilder
+    private func photoSaveBadge(for state: PhotoSaveState) -> some View {
+        Group {
+            switch state {
+            case .processing, .saving:
+                ProgressView().tint(.white).scaleEffect(0.65)
+            case .saved:
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .failed:
+                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+            }
+        }
+        .frame(width: 20, height: 20)
+        .background(.black.opacity(0.8), in: Circle())
+        // Nhãn nằm ở Button bên ngoài (label + value), huy hiệu chỉ
+        // là hình trang trí — để nó tự khai báo thì VoiceOver đọc
+        // hai lần hoặc bị nhãn của Button nuốt mất.
+        .accessibilityHidden(true)
+    }
+
     /// Thumbnail tròn ở góc trái hàng dưới: bấm để mở app Ảnh.
     private var thumbnailButton: some View {
         Button {
@@ -1315,22 +1345,7 @@ struct ContentView: View {
             .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
             .overlay(alignment: .bottomTrailing) {
                 if let state = cam.photoSaveState {
-                    Group {
-                        switch state {
-                        case .processing, .saving:
-                            ProgressView().tint(.white).scaleEffect(0.65)
-                        case .saved:
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                        case .failed:
-                            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
-                        }
-                    }
-                    .frame(width: 20, height: 20)
-                    .background(.black.opacity(0.8), in: Circle())
-                    // Nhãn nằm ở Button bên ngoài (label + value), huy hiệu chỉ
-                    // là hình trang trí — để nó tự khai báo thì VoiceOver đọc
-                    // hai lần hoặc bị nhãn của Button nuốt mất.
-                    .accessibilityHidden(true)
+                    photoSaveBadge(for: state)
                 }
             }
             .contentShape(Circle())
