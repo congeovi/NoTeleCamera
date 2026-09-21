@@ -59,9 +59,16 @@ extension CameraManager {
  
     // MARK: - Chụp
  
-    func capturePhoto(isBurst: Bool = false) {
-        guard isBurst || !isCapturing else { return }
- 
+    /// - Returns: `false` khi cú bấm bị từ chối và KHÔNG có tấm ảnh nào được
+    ///   đặt hàng. Chỗ gọi nào có sổ sách riêng (vòng lặp burst đếm số tấm)
+    ///   phải đọc giá trị này, không thì nó đếm cả những cú bị chặn.
+    @discardableResult
+    func capturePhoto(isBurst: Bool = false) -> Bool {
+        guard isBurst || !isCapturing else { return false }
+        // Đang đổi mode/camera: session có thể đang thiếu video input hoặc
+        // giữa lúc renegotiate format — không bấm máy vào lúc đó.
+        guard canPerform(.shutter) else { return false }
+
         // Chụp nhanh trạng thái trên main actor; mọi cờ của photoOutput sẽ
         // được đọc lại bên trong sessionQueue.
         let mode = settings.mode
@@ -225,6 +232,7 @@ extension CameraManager {
                 }
             }
         }
+        return true
     }
  
     // MARK: - Sổ sách một lần chụp

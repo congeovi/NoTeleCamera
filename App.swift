@@ -6,7 +6,8 @@
 //  (ống siêu rộng 0,5× + ống chính 1×). Ống tele 77mm không bao giờ được
 //  cấp điện, nên OIS hỏng của nó không kêu và không lọt vào tiếng video.
 //
-//  YÊU CẦU: iOS 17+, Xcode 15+, chạy trên máy thật.
+//  YÊU CẦU: iOS 26+, Xcode 26+ — giao diện dùng Liquid Glass thật (API iOS 26),
+//  chạy trên máy thật.
 //
 //  ⚠️ BẮT BUỘC thêm vào Info.plist:
 //    NSCameraUsageDescription            — "Dùng camera để chụp ảnh và quay video"

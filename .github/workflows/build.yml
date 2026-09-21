@@ -9,23 +9,47 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # Giao diện dùng Liquid Glass (API iOS 26) nên máy build phải có Xcode 26.
+    # Image macos-26 mặc định là Xcode 26.6 (SDK iOS 26); macos-14 chỉ có tới
+    # Xcode 16.2 (SDK iOS 18.2) và đang bị GitHub gỡ dần.
+    runs-on: macos-26
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Select Xcode
         run: |
-          if [ -d "/Applications/Xcode_16.2.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.2.app
-          elif [ -d "/Applications/Xcode_16.1.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.1.app
-          elif [ -d "/Applications/Xcode_16.0.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_16.0.app
-          elif [ -d "/Applications/Xcode_15.4.app" ]; then
-            sudo xcode-select -s /Applications/Xcode_15.4.app
+          # Lấy bản Xcode CAO NHẤT mà image có, bằng `sort -V` chứ không dò một
+          # danh sách tên hardcode: danh sách kiểu đó mục rữa theo từng đợt
+          # GitHub cập nhật image, và có tên chưa tồn tại thì cũng chẳng báo gì.
+          # App chỉ cần SDK iOS 26 trở lên cho Liquid Glass, bản nào mới hơn
+          # cũng dùng được.
+          # Loại beta / RC: chúng sort cao hơn bản chính thức cùng số nhưng
+          # không phải thứ muốn build CI bằng.
+          #
+          # `|| true` là bắt buộc: GitHub chạy step bằng `bash -e`, mà `ls` hoặc
+          # `grep` không khớp gì là trả mã lỗi → cả step chết trước khi kịp rơi
+          # về Xcode mặc định của image.
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null \
+            | grep -viE 'beta|release_candidate|_rc' \
+            | sort -V | tail -n1 || true)
+          if [ -n "$latest" ]; then
+            sudo xcode-select -s "$latest"
           fi
+          # Không có Xcode_*.app nào thì giữ bản mặc định của image; bước sau
+          # kiểm tra phiên bản nên không thể lọt Xcode quá cũ.
           xcodebuild -version
+
+      - name: Verify Xcode supports iOS 26 SDK
+        run: |
+          version=$(xcodebuild -version | head -n1 | awk '{print $2}')
+          major=${version%%.*}
+          echo "Xcode $version (major $major)"
+          if [ "$major" -lt 26 ]; then
+            echo "::error::Cần Xcode 26 trở lên để build Liquid Glass (API iOS 26)."
+            exit 1
+          fi
+          xcodebuild -showsdks | grep -i "iphoneos" || true
 
       - name: Install XcodeGen
         run: brew install xcodegen

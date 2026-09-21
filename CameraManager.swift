@@ -104,6 +104,12 @@ final class CameraManager: NSObject, ObservableObject {
     /// Live Photo và movie output loại trừ nhau. Khi Live Photo đang bật ở chế
     /// độ Ảnh thì QuickTake không dùng được — UI cần biết để không hiểu nhầm.
     @Published var quickTakeAvailable = true
+
+    /// True khi `movieOutput` thực sự có mặt trong session ngay sau lần commit
+    /// gần nhất — chỉ được gán từ `applyMode`, sau khi cấu hình đã chốt. Chỗ
+    /// nào cần biết có quay được không (ví dụ `startRecording`) đọc cờ này
+    /// thay vì hỏi thẳng `session.outputs` từ main actor.
+    private(set) var movieOutputAttached = false
  
     // MARK: Chuyển chế độ
 
@@ -112,6 +118,17 @@ final class CameraManager: NSObject, ObservableObject {
     /// UI dựa vào cờ này để giữ hiệu ứng mờ trên preview cho đến khi camera
     /// thật sự sẵn sàng chụp/quay, rồi mới cho lớp mờ tan ra.
     @Published var isModeTransitioning = false
+
+    /// Session đang ở giữa một transaction cấu hình CHƯA CHỐT.
+    ///
+    /// Tách hẳn khỏi `isModeTransitioning`: cờ kia chỉ điều khiển lớp mờ trên
+    /// preview và được watchdog nhả sau 2 giây để preview không kẹt mờ. Cờ này
+    /// là cổng thao tác thật, chỉ đóng lại khi transaction thực sự xong. Gộp
+    /// hai thứ làm một nghĩa là hễ cấu hình chạy quá 2 giây — lần đầu bật
+    /// camera trước, máy nóng — watchdog lại mở cổng cho shutter/QuickTake/zoom
+    /// chạm vào một session còn đang thiếu input, đúng thứ lớp cổng này sinh ra
+    /// để chặn.
+    @Published private(set) var sessionBusy = false
 
     /// Số thứ tự của lần chuyển chế độ đang chạy. Người dùng có thể bấm mode
     /// kế tiếp trong lúc lần trước chưa xong — completion của lần cũ không
@@ -247,6 +264,9 @@ final class CameraManager: NSObject, ObservableObject {
         stopMotion()
         cancelCountdown()
         burstEnded()
+        // Việc bấm dở trước khi vào nền không còn nghĩa gì lúc quay lại.
+        pendingMode = nil
+        pendingReconfigure = false
  
         // Đang quay: dừng ghi trước, đợi delegate ghi xong file rồi mới tắt
         // session. Tắt ngay sẽ làm hỏng file.
@@ -603,24 +623,87 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
  
+    // MARK: - Cổng thao tác
+
+    /// Đổi mode, flip, chụp, QuickTake và zoom đều đụng chung `session`/device
+    /// đang cấu hình dở dang. Bấm chồng các thao tác này lên nhau là nguồn của
+    /// phần lớn race đã ghi trong audit (hai video input, chụp trên camera đã
+    /// bị gỡ, QuickTake báo sẵn sàng dù movie output chưa kịp thêm). Đây là
+    /// nơi DUY NHẤT quyết định một thao tác có được phép chạy ngay bây giờ
+    /// không — volume shutter và mọi lối gọi trực tiếp khác cũng phải qua đây,
+    /// không chỉ nút bấm trên UI.
+    enum CameraAction {
+        case changeMode, flip, shutter, quickTake, zoom, reconfigure
+        /// Chạm lấy nét, kéo EV — chỉnh trực tiếp trên device đang dùng. Không
+        /// dựng lại session nhưng vẫn `lockForConfiguration` lên đúng cái
+        /// device mà `applyMode`/`flipCamera` có thể đang tráo.
+        case deviceTweak
+    }
+
+    func canPerform(_ action: CameraAction) -> Bool {
+        switch action {
+        case .changeMode:
+            // KHÔNG xét `sessionBusy` ở đây: đang bận thì `setMode` vẫn nhận
+            // và giữ lại thành `pendingMode`, chứ không vứt thao tác đi.
+            return !isRecording && !isProcessing && !isBursting
+        case .flip, .reconfigure:
+            // `isBursting` phải có mặt ở cả hai: dựng lại session giữa một mẻ
+            // chụp liên tiếp là mẻ đó mất cấu hình giữa chừng, đúng lý do
+            // `setMode` đã chặn burst.
+            return !isRecording && !isProcessing && !isBursting && !sessionBusy
+        case .shutter, .zoom, .deviceTweak:
+            return !sessionBusy
+        case .quickTake:
+            return !sessionBusy && !isRecording && !isBursting
+        }
+    }
+
     // MARK: - Đổi chế độ
- 
+
+    /// Chế độ cuối cùng người dùng chọn trong lúc một lần chuyển chế độ khác
+    /// còn đang chạy dở. Chỉ giữ ĐÚNG MỘT giá trị — bấm liên tiếp trong lúc
+    /// đang transitioning không xếp hàng vô hạn, chỉ mode cuối cùng được áp
+    /// sau khi lần hiện tại xong.
+    private var pendingMode: CaptureMode?
+
+    /// Có một `reconfigure()` bị hoãn vì session đang bận. Mọi chỗ gọi
+    /// `reconfigure()` đều đã `settings.save()` TRƯỚC khi gọi, nên bỏ qua yêu
+    /// cầu là để settings và session nói hai chuyện khác nhau — nút Live Photo
+    /// sáng lên trong khi movie output vẫn còn nguyên trong session.
+    private var pendingReconfigure = false
+
     func setMode(_ new: CaptureMode) {
-        guard new != settings.mode, !isRecording, !isProcessing else { return }
+        guard new != settings.mode, canPerform(.changeMode) else { return }
+        // Đang chuyển chế độ dở dang: không chen ngang vào giữa transaction
+        // session hiện tại, chỉ ghi nhớ để áp ngay khi nó xong. Xét
+        // `sessionBusy` chứ không phải lớp mờ — lớp mờ có thể đã tan vì
+        // watchdog trong khi cấu hình vẫn đang chạy.
+        guard !sessionBusy else {
+            pendingMode = new
+            return
+        }
+        pendingMode = nil
         settings.mode = new
         settings.save()
         if new != .video && new != .slomo { setTorch(false) }
         applyMode(new)
     }
- 
+
     /// Dựng lại session cho những thay đổi KHÔNG kèm đổi chế độ — bật/tắt Live
     /// Photo, đổi chất lượng video. Trước đây các chỗ này gọi setMode với chính
     /// chế độ hiện tại nên bị guard chặn và không có tác dụng gì.
     func reconfigure() {
-        guard !isRecording, !isProcessing else { return }
-        applyMode(settings.mode)
+        if canPerform(.reconfigure) {
+            applyMode(settings.mode)
+            return
+        }
+        // Không chạy được ngay. Chỉ kẹt vì session đang bận — tức bỏ
+        // `sessionBusy` ra thì cổng mở — thì giữ lại và áp khi transaction hiện
+        // tại xong. Kẹt vì đang quay / đang xuất file / đang chụp liên tiếp thì
+        // bỏ hẳn: hoãn sang lúc đó là dựng lại session giữa việc khác.
+        if !isRecording, !isProcessing, !isBursting { pendingReconfigure = true }
     }
- 
+
     private func applyMode(_ mode: CaptureMode) {
         // Lấy device trên main actor TRƯỚC khi nhảy sang sessionQueue.
         // Bản cũ dùng MainActor.assumeIsolated bên trong sessionQueue, mà
@@ -644,9 +727,22 @@ final class CameraManager: NSObject, ObservableObject {
         // Mic chuẩn bị sẵn cho hai chế độ quay có tiếng.
         let wantsMic = (mode == .video || mode == .slomo)
  
-        quickTakeAvailable = !wantsLive
+        // quickTakeAvailable/movieOutputAttached KHÔNG được gán ở đây nữa —
+        // đó là dự đoán trước khi cấu hình thật sự chạy. Nếu addOutput
+        // movieOutput bên dưới thất bại thì UI vẫn tưởng QuickTake dùng được.
+        // Cả hai chỉ được gán trong Task@MainActor sau commitConfiguration,
+        // đọc thẳng từ session.outputs thật.
         // Rời quay chậm thì mức fps đã đo được không còn ý nghĩa.
         if mode != .slomo { activeSlomoFps = nil }
+
+        // Macro chỉ sống ở chế độ Ảnh, camera sau. Rời khỏi đó mà không tắt thì
+        // `autoFocusRangeRestriction = .near` còn nguyên trên device và mọi chế
+        // độ sau đều lấy nét ở dải gần — nhìn như camera hỏng lấy nét.
+        if settings.macroOn && (mode != .photo || front) {
+            settings.macroOn = false
+            settings.save()
+            applyMacroIfNeeded()
+        }
  
         sessionQueue.async { [weak self] in
             guard let self else { return }
@@ -793,6 +889,12 @@ final class CameraManager: NSObject, ObservableObject {
  
             self.session.commitConfiguration()
 
+            // Nguồn sự thật cho quickTakeAvailable: đọc THẲNG session ngay
+            // sau khi commit, không suy từ `wantsLive`/`wantsDepth` — nếu
+            // addOutput(movieOutput) phía trên thất bại vì lý do nào đó thì
+            // hai biến kia vẫn nói "sẽ có movie output" trong khi thực tế không.
+            let movieAttached = self.session.outputs.contains(self.movieOutput)
+
             // Đổi chế độ ảnh ↔ video có thể khiến AVFoundation renegotiate
             // activeFormat và tự ý đặt lại videoZoomFactor (thường về mức
             // 0,5x của ống siêu rộng). Ép lại về mốc 1x ngay tại đây để zoom
@@ -806,6 +908,11 @@ final class CameraManager: NSObject, ObservableObject {
             activeDev.unlockForConfiguration()
 
             Task { @MainActor in
+                self.movieOutputAttached = movieAttached
+                // QuickTake cần cả movie output thật sự có mặt LẪN đang ở chế
+                // độ Ảnh — Live Photo bật thì movie output đã bị gỡ ở trên nên
+                // `movieAttached` tự nhiên là false, không cần kiểm wantsLive.
+                self.quickTakeAvailable = movieAttached && (mode == .photo)
                 if let swappedInput {
                     self.videoInput = swappedInput
                     self.startRotationCoordinator(for: activeDev)
@@ -856,20 +963,55 @@ final class CameraManager: NSObject, ObservableObject {
  
     // MARK: Hiệu ứng chuyển chế độ
 
-    /// Bắt đầu một lần chuyển chế độ: bật cờ mờ cho UI và hẹn watchdog nhả cờ
-    /// đề phòng completion bị mất (session bị gián đoạn, lỗi...). Trả về số
-    /// thứ tự của lần này để completion đối chiếu khi gọi finishModeTransition.
+    /// Bắt đầu một lần chuyển chế độ: đóng CẢ HAI cờ — lớp mờ cho UI
+    /// (`isModeTransitioning`) và cổng thao tác (`sessionBusy`) — rồi hẹn
+    /// watchdog hai nhịp đề phòng completion bị mất (session bị gián đoạn,
+    /// lỗi...). Trả về số thứ tự của lần này để completion đối chiếu khi gọi
+    /// `finishModeTransition`.
     private func beginModeTransition() -> Int {
         modeTransitionGeneration += 1
         let gen = modeTransitionGeneration
         isModeTransitioning = true
+        sessionBusy = true
+        // Hẹn giờ đang đếm thuộc về cấu hình cũ. Để nguyên thì lúc nó về 0,
+        // `capturePhoto` lại bị chính cổng này chặn im lặng — người dùng đợi
+        // hết giờ và không có tấm ảnh nào, cũng không có lời báo nào.
+        cancelCountdown()
         modeTransitionWatchdog?.cancel()
         modeTransitionWatchdog = Task { [weak self] in
+            // Nhịp 1 — chỉ nhả LỚP MỜ. Cấu hình rất có thể vẫn đang chạy trên
+            // sessionQueue (lần đầu bật camera trước, máy nóng), nên tuyệt đối
+            // không mở cổng thao tác ở đây.
             try? await Task.sleep(for: .seconds(2))
-            guard let self, !Task.isCancelled else { return }
-            self.finishModeTransition(generation: gen)
+            guard !Task.isCancelled else { return }
+            self?.releaseModeBlur(generation: gen)
+
+            // Nhịp 2 — quá hạn này thì coi như completion đã mất hẳn. Mở cổng
+            // để app không kẹt vĩnh viễn, nhưng báo lỗi và BỎ `pendingMode`:
+            // watchdog không có quyền coi cấu hình là đã thành công.
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.abandonModeTransition(generation: gen)
         }
         return gen
+    }
+
+    /// Nhả lớp mờ trên preview, KHÔNG động tới cổng thao tác.
+    private func releaseModeBlur(generation: Int) {
+        guard generation == modeTransitionGeneration else { return }
+        isModeTransitioning = false
+    }
+
+    /// Completion coi như mất hẳn. Mở cổng để app còn dùng được, nhưng nói rõ
+    /// là đã hỏng chứ không im lặng như thể mọi thứ ổn.
+    private func abandonModeTransition(generation: Int) {
+        guard generation == modeTransitionGeneration else { return }
+        modeTransitionWatchdog = nil
+        isModeTransitioning = false
+        sessionBusy = false
+        pendingMode = nil
+        pendingReconfigure = false
+        errorMessage = "Camera không phản hồi khi đổi chế độ. Thử lại."
     }
 
     /// Nhả cờ chuyển chế độ — chỉ lần chuyển MỚI NHẤT mới có quyền nhả, để
@@ -880,6 +1022,21 @@ final class CameraManager: NSObject, ObservableObject {
         modeTransitionWatchdog?.cancel()
         modeTransitionWatchdog = nil
         isModeTransitioning = false
+        sessionBusy = false
+        // Chỉ đường này — completion THẬT của transaction — mới được áp việc
+        // đang chờ. Watchdog không, vì nó không biết cấu hình đã xong hay chưa.
+        if let next = pendingMode, next != settings.mode {
+            pendingMode = nil
+            // setMode dựng lại session đầy đủ, nuốt luôn phần reconfigure.
+            pendingReconfigure = false
+            setMode(next)
+            return
+        }
+        pendingMode = nil
+        if pendingReconfigure {
+            pendingReconfigure = false
+            reconfigure()
+        }
     }
 
     /// Tìm format hỗ trợ tốc độ cao, ưu tiên độ phân giải lớn nhất ở mức fps đó.
@@ -939,6 +1096,11 @@ final class CameraManager: NSObject, ObservableObject {
     /// 13 Pro chụp macro bằng ống siêu rộng lấy nét gần.
     /// Bật macro = ép về 0,5× và giới hạn dải lấy nét về phía gần.
     func setMacro(_ on: Bool) {
+        // Tắt thì luôn cho qua (setZoom gọi vào đây để huỷ macro khi zoom ra).
+        // Bật thì phải đúng chỗ — xem `macroAvailable`. Công tắc trong Cài đặt
+        // là lối duy nhất còn lại để bật macro, nên chốt chặn phải ở đây chứ
+        // không chỉ ở điều kiện hiển thị của UI.
+        guard !on || macroAvailable else { return }
         settings.macroOn = on
         settings.save()
         if on { setZoom(0.5) }
@@ -946,8 +1108,10 @@ final class CameraManager: NSObject, ObservableObject {
     }
  
     private func applyMacroIfNeeded() {
-        guard let device, supportsMacro else { return }
-        let on = settings.macroOn && !isFront
+        // Không chặn theo `supportsMacro`: đường TẮT cũng đi qua đây, mà máy
+        // không hỗ trợ macro thì cũng phải gỡ được `.near` nếu nó đã bị đặt.
+        guard let device else { return }
+        let on = settings.macroOn && macroAvailable
         sessionQueue.async {
             guard (try? device.lockForConfiguration()) != nil else { return }
             if device.isAutoFocusRangeRestrictionSupported {
@@ -960,36 +1124,69 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Đổi camera trước / sau
  
     func flipCamera() {
-        guard !isRecording, !isProcessing, let current = videoInput else { return }
+        guard canPerform(.flip), videoInput != nil else { return }
         let goingFront = !isFront
-        isFront = goingFront
+        let mode = settings.mode
+
+        // Mở cổng transitioning NGAY từ đây — bản cũ chỉ mở nó ở applyMode
+        // cuối hàm, nên suốt lúc removeInput/addInput đang chạy dở, gate vẫn
+        // cho shutter/QuickTake/zoom lọt qua và có thể chạm vào một session
+        // đang thiếu video input.
+        let transitionGen = beginModeTransition()
+
+        // Tắt torch của camera đang rời đi trước, không đổi isFront ở đây —
+        // isFront chỉ được gán SAU khi camera mới thật sự vào session, để
+        // flip thất bại không để icon/mirror hiện sai trạng thái.
         setTorch(false)
         // Ảnh đang bay thuộc về camera cũ — bỏ hết, đừng để kẹt nút chụp.
         abortAllCaptures()
- 
+
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            let newCam = Self.bestDevice(for: self.settings.mode, isFront: goingFront)
- 
-            guard let newCam, let newInput = try? AVCaptureDeviceInput(device: newCam) else { return }
- 
-            self.session.beginConfiguration()
-            self.session.removeInput(current)
-            if self.session.canAddInput(newInput) {
-                self.session.addInput(newInput)
-            } else {
-                self.session.addInput(current)
-                self.session.commitConfiguration()
+
+            // Không dùng videoInput đọc trên main actor trước khi vào hàng
+            // đợi: nếu một applyMode khác vừa được enqueue trước flip trên
+            // cùng sessionQueue, input thật trong session lúc block này chạy
+            // có thể đã khác input mà main actor thấy lúc gọi flipCamera().
+            // Hỏi thẳng session, giống cách applyMode đã làm.
+            guard let currentInput = self.session.inputs
+                .compactMap({ $0 as? AVCaptureDeviceInput })
+                .first(where: { $0.device.hasMediaType(.video) }) else {
+                Task { @MainActor in self.finishModeTransition(generation: transitionGen) }
                 return
             }
- 
+
+            let newCam = Self.bestDevice(for: mode, isFront: goingFront)
+            guard let newCam, let newInput = try? AVCaptureDeviceInput(device: newCam) else {
+                Task { @MainActor in
+                    self.errorMessage = "Không mở được camera."
+                    self.finishModeTransition(generation: transitionGen)
+                }
+                return
+            }
+
+            self.session.beginConfiguration()
+            self.session.removeInput(currentInput)
+            guard self.session.canAddInput(newInput) else {
+                // Rollback đầy đủ: giữ nguyên input cũ, không đụng tới bất kỳ
+                // state UI nào (isFront/videoInput/capability vẫn của camera cũ).
+                self.session.addInput(currentInput)
+                self.session.commitConfiguration()
+                Task { @MainActor in
+                    self.errorMessage = "Không chuyển được camera."
+                    self.finishModeTransition(generation: transitionGen)
+                }
+                return
+            }
+            self.session.addInput(newInput)
+
             // Movie output che mất isLivePhotoCaptureSupported và
             // isDepthDataDeliverySupported, nên phải gỡ ra trước khi đọc
             // khả năng của camera mới. applyMode bên dưới sẽ gắn lại nếu cần.
             if self.session.outputs.contains(self.movieOutput) {
                 self.session.removeOutput(self.movieOutput)
             }
- 
+
             let proRAW = self.photoOutput.isAppleProRAWSupported
             if proRAW { self.photoOutput.isAppleProRAWEnabled = true }
             let livePhoto = self.photoOutput.isLivePhotoCaptureSupported
@@ -997,12 +1194,12 @@ final class CameraManager: NSObject, ObservableObject {
             let hasUltraWide = newCam.constituentDevices.contains {
                 $0.deviceType == .builtInUltraWideCamera
             }
- 
+
             if let maxDim = newCam.activeFormat.supportedMaxPhotoDimensions.last {
                 self.photoOutput.maxPhotoDimensions = maxDim
             }
             self.session.commitConfiguration()
- 
+
             let switchOver = CGFloat(newCam.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1.0)
             try? newCam.lockForConfiguration()
             newCam.videoZoomFactor = switchOver
@@ -1010,10 +1207,13 @@ final class CameraManager: NSObject, ObservableObject {
                 newCam.isSubjectAreaChangeMonitoringEnabled = true
             }
             newCam.unlockForConfiguration()
- 
+
             let newFormat = newCam.activeFormat
- 
+
             Task { @MainActor in
+                // Từ đây trở xuống cấu hình mới ĐÃ commit thành công — giờ
+                // mới là lúc an toàn để đổi state UI.
+                self.isFront = goingFront
                 self.videoInput = newInput
                 self.baseFactor = switchOver
                 self.displayZoom = 1.0
@@ -1024,23 +1224,26 @@ final class CameraManager: NSObject, ObservableObject {
                 // Camera trước có bộ format riêng — defaultFormat cũ không còn
                 // đúng, giữ lại sẽ làm applyMode ép nhầm format.
                 self.defaultFormat = newFormat
- 
+
                 // Khả năng của hai camera khác nhau; giữ giá trị đọc từ camera
                 // sau sẽ làm UI hiện nút cho thứ camera trước không có.
                 self.supportsProRAW = proRAW
                 self.supportsLivePhoto = livePhoto
                 self.supportsDepth = depth
                 self.supportsMacro = hasUltraWide
- 
+
                 if goingFront && self.settings.macroOn {
                     self.settings.macroOn = false
                     self.settings.save()
                 }
- 
+
                 self.startRotationCoordinator(for: newCam)
- 
+
                 // Preset, format, Live Photo, depth đều phải áp lại cho camera
-                // mới — bản cũ giữ nguyên cấu hình của camera cũ.
+                // mới — bản cũ giữ nguyên cấu hình của camera cũ. applyMode tự
+                // mở một generation transitioning mới và sẽ đóng sổ nó khi
+                // xong; generation của flip (transitionGen) không cần tự đóng
+                // vì chưa từng gọi finishModeTransition ở nhánh thành công.
                 self.applyMode(self.settings.mode)
             }
         }
@@ -1049,7 +1252,9 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Zoom
  
     func setZoom(_ target: CGFloat) {
-        guard let device else { return }
+        // Đang đổi mode/camera thì `device`/`baseFactor` có thể đang giữa lúc
+        // đổi — từ chối và giữ nguyên UI thay vì áp zoom lên device sắp đổi.
+        guard canPerform(.zoom), let device else { return }
         let minDisplay = device.minAvailableVideoZoomFactor / baseFactor
         let hardMax = device.maxAvailableVideoZoomFactor / baseFactor
         let clamped = min(max(target, minDisplay), min(maxDisplayZoom, hardMax))
@@ -1087,11 +1292,41 @@ final class CameraManager: NSObject, ObservableObject {
     ///    khác — preview phải đứng cùng chỗ với file, đừng hứa hão.
     var outputAspectRatio: CGFloat {
         if settings.mode.isRecordingMode { return 9.0 / 16.0 }
-        if settings.mode == .photo {
-            if settings.livePhotoOn, supportsLivePhoto { return 3.0 / 4.0 }
-            if settings.photoFormat == .proRAW, supportsProRAW { return 3.0 / 4.0 }
-        }
+        if aspectCropSkipped { return 3.0 / 4.0 }
         return settings.aspect.value
+    }
+
+    /// `savePhoto` có bỏ qua bước cắt tỉ lệ không — nguồn sự thật DUY NHẤT cho
+    /// quy tắc "Live Photo / ProRAW ⇒ ảnh vẫn ra 4:3". Khung preview, nút tỉ lệ
+    /// trên thanh trên và dòng nhắc trong Cài đặt đều đọc từ đây, để ba chỗ
+    /// không trôi khỏi nhau.
+    var aspectCropSkipped: Bool {
+        guard settings.mode == .photo else { return false }
+        if settings.livePhotoOn, supportsLivePhoto { return true }
+        if settings.photoFormat == .proRAW, supportsProRAW { return true }
+        return false
+    }
+
+    /// Vì sao khung đang chọn chưa áp được — `nil` khi khung đang chọn đúng là
+    /// khung file sẽ ghi ra (kể cả trường hợp bị khoá nhưng vốn đã chọn 4:3).
+    var aspectCropSkippedReason: String? {
+        guard aspectCropSkipped, settings.aspect != .r4x3 else { return nil }
+        if settings.livePhotoOn, supportsLivePhoto {
+            return "Live Photo đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ sẽ phá cặp Live Photo. Tắt Live Photo nếu muốn khung \(settings.aspect.rawValue)."
+        }
+        return "ProRAW đang bật nên ảnh vẫn lưu ở 4:3: cắt tỉ lệ không áp được cho RAW. Chuyển định dạng về HEIF nếu muốn khung \(settings.aspect.rawValue)."
+    }
+
+    /// Macro chỉ có nghĩa ở ống siêu rộng của camera sau, chế độ Ảnh (§9).
+    ///
+    /// Phải kiểm cả `mode`, không chỉ `supportsMacro`. `supportsMacro` là năng
+    /// lực của DEVICE: ở Video và Tua nhanh vẫn là thiết bị kép nên nó còn
+    /// `true`, và chỉ dựa vào nó thì macro bật thật giữa lúc quay. Ở Quay chậm
+    /// thì device có được tráo sang ống 1× và cờ được đọc lại, nhưng phải chờ
+    /// hết vòng cấu hình bất đồng bộ của `applyMode` — trong khoảng đó cờ vẫn
+    /// là giá trị cũ.
+    var macroAvailable: Bool {
+        supportsMacro && !isFront && settings.mode == .photo
     }
 
     // MARK: - Lấy nét & phơi sáng
@@ -1109,7 +1344,9 @@ final class CameraManager: NSObject, ObservableObject {
     static let evDragPointsPerStop: CGFloat = 90
 
     func focus(at devicePoint: CGPoint, uiPoint: CGPoint) {
-        guard let device else { return }
+        // `device` ở đây có thể là cái sắp bị `applyMode`/`flipCamera` tráo —
+        // khoá cấu hình lên nó giữa chừng là chỉnh lấy nét cho ống đã rời đi.
+        guard canPerform(.deviceTweak), let device else { return }
         focusPoint = uiPoint
         isLocked = false
         // Camera gốc trả EV về 0 mỗi lần chạm điểm mới — giữ lại mức cũ sẽ làm
@@ -1265,7 +1502,7 @@ final class CameraManager: NSObject, ObservableObject {
     private var lastPushedBias: Float = 0
 
     func setExposureBias(_ value: Float) {
-        guard let device else { return }
+        guard canPerform(.deviceTweak), let device else { return }
         let target = min(max(value, -2.0), 2.0)
         guard target != lastPushedBias else { return }
         lastPushedBias = target
@@ -1289,6 +1526,9 @@ final class CameraManager: NSObject, ObservableObject {
         settings.save()
     }
  
+    /// KHÔNG qua `canPerform`: `applyMode` và `flipCamera` gọi hàm này ngay
+    /// giữa lúc cổng đang đóng (tắt đèn của camera sắp rời đi, bật lại đèn cho
+    /// camera mới). Thêm cổng vào đây là hai đường đó tự chặn chính mình.
     func setTorch(_ on: Bool) {
         guard let device, device.hasTorch else { return }
         torchOn = on
@@ -1302,6 +1542,11 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Nút chụp điều phối
  
     func shutterTapped() {
+        // isRecording đã tự loại trừ sessionBusy (setMode, reconfigure và
+        // flipCamera đều chặn khi đang quay, nên không đường nào mở được
+        // transaction giữa lúc quay), vậy nhánh dừng quay không bị guard này
+        // chặn oan.
+        guard canPerform(.shutter) else { return }
         if settings.mode.isRecordingMode {
             if isRecording { stopRecording() } else { startRecording(quickTake: false) }
             return
@@ -1313,12 +1558,12 @@ final class CameraManager: NSObject, ObservableObject {
             runCountdown(from: settings.timerOption.rawValue)
         }
     }
- 
+
     /// Giữ nút chụp ở chế độ Ảnh → QuickTake.
     /// Không dùng được khi Live Photo đang bật, vì movie output đã bị gỡ.
     func shutterHoldBegan() {
-        guard settings.mode == .photo, quickTakeAvailable,
-              !isRecording, !isBursting, countdown == 0 else { return }
+        guard canPerform(.quickTake), settings.mode == .photo, quickTakeAvailable,
+              countdown == 0 else { return }
         startRecording(quickTake: true)
     }
  
@@ -1349,8 +1594,10 @@ final class CameraManager: NSObject, ObservableObject {
                 // Backpressure: bản cũ bắn đều 220ms bất kể output có tiêu hoá
                 // kịp không, nên khi máy nóng hoặc đang lưu ProRAW thì
                 // pendingCaptures phình dần và bộ nhớ đi theo.
-                if capturesInFlight < 4 {
-                    capturePhoto(isBurst: true)
+                // Chỉ đếm khi `capturePhoto` THẬT SỰ nhận. Đếm vô điều kiện
+                // thì lúc cổng chặn (đang tráo camera chẳng hạn) badge vẫn
+                // nhảy số trong khi không có tấm nào được chụp.
+                if capturesInFlight < 4, capturePhoto(isBurst: true) {
                     burstCount += 1
                 }
                 try? await Task.sleep(for: .milliseconds(120))
@@ -1396,7 +1643,11 @@ final class CameraManager: NSObject, ObservableObject {
             return
         }
  
-        guard session.outputs.contains(movieOutput) else {
+        // Đọc cờ đã chốt từ applyMode thay vì hỏi thẳng session.outputs ở
+        // main actor — mọi truy cập session.inputs/outputs nên nằm trên
+        // sessionQueue, và applyMode đã gán movieOutputAttached đúng sau
+        // commitConfiguration.
+        guard movieOutputAttached else {
             errorMessage = "Chưa sẵn sàng quay. Tắt Live Photo rồi thử lại."
             return
         }
