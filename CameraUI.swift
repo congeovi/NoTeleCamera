@@ -508,6 +508,9 @@ struct ContentView: View {
     /// trượt từ ô này sang ô kia thay vì tắt phụt rồi bật lại, như Camera gốc.
     @Namespace private var glassNamespace
     @State private var shutterDrag: CGFloat = 0
+    /// Mốc mà thanh chế độ đang canh giữa. Tách khỏi `settings.mode` để người dùng
+    /// được kéo tự nhiên, nhưng chỉ cấu hình lại camera một lần khi thanh đã dừng.
+    @State private var modeScrollTarget: CaptureMode.ID?
     /// Cú vuốt ngang trên khung ngắm chỉ được đổi ĐÚNG MỘT chế độ: cờ này chốt
     /// lại ngay sau bước đầu tiên và chỉ mở khi nhấc tay.
     @State private var modeSwipeConsumed = false
@@ -935,6 +938,11 @@ struct ContentView: View {
                 .contentShape(Circle())
         }
         .glassEffect(.regular.interactive(true), in: Circle())
+        .overlay {
+            Circle()
+                .stroke(.yellow, lineWidth: 2)
+                .allowsHitTesting(false)
+        }
         .accessibilityLabel("Cài đặt")
     }
 
@@ -1162,14 +1170,12 @@ struct ContentView: View {
     /// kính sáng hơn + chữ vàng. Giữ nguyên hành vi cũ: tự canh giữa mốc đang
     /// chọn dù đổi bằng nút hay bằng cú vuốt ngang trên khung ngắm.
     private var modeSelector: some View {
-        // Bề rộng pill phải đo được thì mới tính nổi khoảng đệm hai đầu: hằng số
-        // cũ (56pt) nhỏ hơn mức cần (~77pt ở iPhone 13 Pro) nên `scrollTo` bị
-        // kẹp ở biên nội dung và hai mốc TUA NHANH / CHÂN DUNG không bao giờ
-        // canh được vào giữa.
+        // Bề rộng pill phải đo được thì mới tính nổi content margin hai đầu,
+        // nhờ đó TUA NHANH và CHÂN DUNG vẫn trở thành target nằm đúng giữa.
         GeometryReader { geo in
             modePill(width: geo.size.width)
         }
-        .frame(height: 40)
+        .frame(height: 48)
         .frame(maxWidth: .infinity)
     }
 
@@ -1179,67 +1185,89 @@ struct ContentView: View {
         // (pill − mốc)/2 ≤ pill/2. Dư ra chỉ là khoảng trống cuộn được, vô hại.
         let inset = max(width / 2, 0)
 
-        return ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                // Container CHỈ bọc các mốc. Kính nền của pill nằm ngoài, nếu
-                // để chung thì hai mảng chồng nhau bị hoà làm một cục kính dày
-                // thay vì "khối sáng trượt trên đường ray".
-                GlassEffectContainer(spacing: 0) {
-                    HStack(spacing: 4) {
-                        // Hai khoảng đệm trong suốt để mốc đầu và mốc cuối vẫn canh
-                        // được vào giữa pill — cuộn không bị kẹp ở hai đầu.
-                        Color.clear.frame(width: inset)
-
-                        ForEach(CaptureMode.ordered) { m in
-                            Button {
-                                if m == cam.settings.mode {
-                                    // Bấm lại chế độ đang chọn không đổi gì, nhưng
-                                    // vẫn canh giữa lại thanh — như bản cũ làm.
-                                    withAnimation(.easeOut(duration: 0.25)) {
-                                        proxy.scrollTo(m.id, anchor: .center)
-                                    }
-                                } else {
-                                    applyModeSelection(m)
+        return ScrollView(.horizontal, showsIndicators: false) {
+            // Container CHỈ bọc các mốc. Kính nền của pill nằm ngoài, nếu
+            // để chung thì hai mảng chồng nhau bị hoà làm một cục kính dày
+            // thay vì "khối sáng trượt trên đường ray".
+            GlassEffectContainer(spacing: 0) {
+                HStack(spacing: 6) {
+                    ForEach(CaptureMode.ordered) { m in
+                        Button {
+                            if m == cam.settings.mode {
+                                // Bấm lại chế độ đang chọn vẫn đưa nó về đúng tâm.
+                                withAnimation(.easeOut(duration: 0.25)) {
+                                    modeScrollTarget = m.id
                                 }
-                            } label: {
-                                Text(m.label)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.75))
-                                    .padding(.horizontal, 10)
-                                    .frame(height: 32)
-                                    .contentShape(Capsule())
+                            } else if applyModeSelection(m) {
+                                withAnimation(.easeOut(duration: 0.25)) {
+                                    modeScrollTarget = m.id
+                                }
                             }
-                            .id(m.id)
-                            // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
-                            // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
-                            // tắt phụt rồi bật lại — GlassEffectContainer lo phần
-                            // morph. Mốc không chọn dùng Glass.identity nên không
-                            // sinh thêm mảng kính nào.
-                            .glassEffect(cam.settings.mode == m
-                                         ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
-                                         : Glass.identity,
-                                         in: Capsule())
-                            .glassEffectID(cam.settings.mode == m ? Self.modeHighlightID : m.id,
-                                           in: glassNamespace)
+                        } label: {
+                            Text(m.label)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(cam.settings.mode == m ? .yellow : .white.opacity(0.78))
+                                .padding(.horizontal, 14)
+                                .frame(minWidth: 64, height: 40)
+                                .contentShape(Capsule())
                         }
-
-                        Color.clear.frame(width: inset)
+                        .id(m.id)
+                        // Khối kính của mốc đang chọn mang ĐÚNG một mã hiệu cố
+                        // định, nên khi đổi chế độ nó "trượt" sang ô mới thay vì
+                        // tắt phụt rồi bật lại — GlassEffectContainer lo phần
+                        // morph. Mốc không chọn dùng Glass.identity nên không
+                        // sinh thêm mảng kính nào.
+                        .glassEffect(cam.settings.mode == m
+                                     ? Glass.regular.tint(.white.opacity(0.22)).interactive(true)
+                                     : Glass.identity,
+                                     in: Capsule())
+                        .glassEffectID(cam.settings.mode == m ? Self.modeHighlightID : m.id,
+                                       in: glassNamespace)
                     }
                 }
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
+                .scrollTargetLayout()
             }
-            .frame(height: 40)
-            // ScrollView clip theo hình chữ nhật, không theo capsule của kính —
-            // thiếu dòng này thì chữ của mốc đầu/cuối tràn ra ngoài hai đầu bo.
-            .clipShape(Capsule())
-            .glassEffect(.regular, in: Capsule())
-            .onAppear { proxy.scrollTo(cam.settings.mode.id, anchor: .center) }
-            // Chế độ có thể đổi từ nút bấm hoặc từ cú vuốt ngang trên khung
-            // ngắm — bám theo `settings.mode` để thanh luôn canh giữa đúng chế
-            // độ, không phụ thuộc nguồn đổi.
-            .onChange(of: cam.settings.mode) { _, m in
-                withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(m.id, anchor: .center) }
+            .padding(.vertical, 4)
+        }
+        // Khoảng cuộn hai đầu đủ lớn để cả TUA NHANH lẫn CHÂN DUNG canh được
+        // đúng tâm, nhưng không trở thành scroll target riêng.
+        .contentMargins(.horizontal, inset, for: .scrollContent)
+        .scrollTargetBehavior(.viewAligned(limitBehavior: .alwaysByOne, anchor: .center))
+        .scrollPosition(id: $modeScrollTarget, anchor: .center)
+        .onScrollPhaseChange { oldPhase, newPhase in
+            guard oldPhase.isScrolling, !newPhase.isScrolling else { return }
+            commitModeScrollTarget()
+        }
+        .frame(height: 48)
+        // ScrollView clip theo hình chữ nhật, không theo capsule của kính —
+        // thiếu dòng này thì chữ của mốc đầu/cuối tràn ra ngoài hai đầu bo.
+        .clipShape(Capsule())
+        .glassEffect(.regular, in: Capsule())
+        .onAppear { modeScrollTarget = cam.settings.mode.id }
+        // Chế độ có thể đổi từ nút bấm hoặc từ cú vuốt ngang trên khung ngắm —
+        // bám theo `settings.mode` để thanh luôn canh giữa đúng chế độ.
+        .onChange(of: cam.settings.mode) { _, m in
+            guard modeScrollTarget != m.id else { return }
+            withAnimation(.easeOut(duration: 0.25)) {
+                modeScrollTarget = m.id
+            }
+        }
+    }
+
+    /// Chỉ đổi mode sau khi quán tính đã kết thúc. `alwaysByOne` bảo đảm target
+    /// cuối cùng chỉ cách target đầu một mốc, kể cả khi người dùng vuốt rất mạnh.
+    private func commitModeScrollTarget() {
+        guard let id = modeScrollTarget,
+              let mode = CaptureMode.ordered.first(where: { $0.id == id }),
+              mode != cam.settings.mode else { return }
+
+        if applyModeSelection(mode) {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } else {
+            // Camera đang bận: trả thanh về mode thật thay vì để UI và session
+            // hiển thị hai trạng thái khác nhau.
+            withAnimation(.easeOut(duration: 0.2)) {
+                modeScrollTarget = cam.settings.mode.id
             }
         }
     }
