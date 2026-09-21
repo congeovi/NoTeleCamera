@@ -884,12 +884,19 @@ struct ContentView: View {
  
             Spacer()
  
-            Button { showSettings = true } label: {
-                Image(systemName: "chevron.down.circle")
-                    .font(.system(size: 17, weight: .medium))
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 19, weight: .medium))
                     .foregroundStyle(.white)
-                    .frame(width: 42, height: 44)
+                    // Giữ biểu tượng gọn nhưng mở rộng toàn bộ vùng chạm để
+                    // nút ở sát góc màn hình vẫn dễ bấm bằng một tay.
+                    .frame(width: 56, height: 50)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cài đặt")
             .opacity(cam.isRecording ? 0 : 1)
             .disabled(cam.isRecording)
         }
