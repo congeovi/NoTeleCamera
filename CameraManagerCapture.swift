@@ -22,6 +22,67 @@ import CoreImage
 import ImageIO
 import Photos
 import SwiftUI
+
+/// Opt-in, bounded in-memory diagnostics. No disk I/O on the capture path.
+/// All mutable state is protected by lock; callbacks may arrive on different queues.
+final class CaptureDiagnostics: @unchecked Sendable {
+    static let shared = CaptureDiagnostics()
+    private let lock = NSLock()
+    private var enabled = false
+    private var lines: [String] = []
+    private var dropped = 0
+
+    var isEnabled: Bool { lock.withLock { enabled } }
+
+    func setEnabled(_ value: Bool) {
+        lock.withLock {
+            if value && !enabled {
+                lines = ["NoTeleCamera capture diagnostics v1",
+                         "Started: \(ISO8601DateFormatter().string(from: Date()))",
+                         "OS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
+                         "App: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "?") build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") ?? "?")",
+                         "Times: monotonic system uptime milliseconds; callback intervals are NOT EXIF exposure time.",
+                         "No images/GPS recorded. New recording clears the previous in-memory log."]
+                dropped = 0
+            }
+            enabled = value
+        }
+    }
+
+    func event(_ name: String, id: Int64? = nil, at: TimeInterval? = nil,
+               _ details: @autoclosure () -> String = "") {
+        let time = at ?? ProcessInfo.processInfo.systemUptime
+        guard isEnabled else { return }
+        let line = String(format: "t_ms=%.3f", time * 1000)
+            + " id=\(id.map { String($0) } ?? "-") \(name) \(details())"
+        lock.withLock {
+            guard enabled else { return }
+            if lines.count >= 2000 {
+                lines.removeFirst(200)
+                dropped += 200
+            }
+            lines.append(line)
+        }
+    }
+
+    /// Call from a background task after the test. Export includes only this process's log.
+    func export() throws -> URL {
+        let report = lock.withLock {
+            "Dropped old lines: \(dropped)\n" + lines.joined(separator: "\n") + "\n"
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("CameraCaptureDiagnostics.txt")
+        try report.write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
+
+    static func deviceDetails(_ device: AVCaptureDevice?) -> String {
+        guard let device else { return "device=missing" }
+        return "device=\(device.deviceType.rawValue) position=\(device.position.rawValue) zoom=\(device.videoZoomFactor)"
+            + " previewExposure_ms=\(CMTimeGetSeconds(device.exposureDuration) * 1000) previewISO=\(device.iso)"
+            + " adjustingFocus=\(device.isAdjustingFocus) focusMode=\(device.focusMode.rawValue) lensPosition=\(device.lensPosition)"
+            + " adjustingExposure=\(device.isAdjustingExposure) exposureMode=\(device.exposureMode.rawValue)"
+    }
+}
  
 // MARK: - Gói kết quả của một lần chụp
  
@@ -64,10 +125,17 @@ extension CameraManager {
     ///   phải đọc giá trị này, không thì nó đếm cả những cú bị chặn.
     @discardableResult
     func capturePhoto(isBurst: Bool = false) -> Bool {
-        guard isBurst || !isCapturing else { return false }
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        guard isBurst || !isCapturing else {
+            CaptureDiagnostics.shared.event("requestRejected", "reason=captureInFlight")
+            return false
+        }
         // Đang đổi mode/camera: session có thể đang thiếu video input hoặc
         // giữa lúc renegotiate format — không bấm máy vào lúc đó.
-        guard canPerform(.shutter) else { return false }
+        guard canPerform(.shutter) else {
+            CaptureDiagnostics.shared.event("requestRejected", "reason=sessionBusy")
+            return false
+        }
 
         // Chụp nhanh trạng thái trên main actor; mọi cờ của photoOutput sẽ
         // được đọc lại bên trong sessionQueue.
@@ -91,10 +159,12 @@ extension CameraManager {
 
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            let sessionEnteredAt = ProcessInfo.processInfo.systemUptime
  
             // Bấm chụp lúc có cuộc gọi đến hoặc app khác đang chiếm camera:
             // bản cũ đặt isCapturing = true rồi không có callback nào về.
             guard self.session.isRunning else {
+                CaptureDiagnostics.shared.event("requestRejected", "reason=sessionNotRunning")
                 Task { @MainActor in
                     self.endCapture(id: nil)
                     self.statusMessage = "Camera chưa sẵn sàng, chưa chụp được."
@@ -205,14 +275,22 @@ extension CameraManager {
             pending.expectsLivePhoto = live
             let id = photoSettings.uniqueID
             let box = UncheckedBox(photoSettings)
+            CaptureDiagnostics.shared.event("request", id: id, at: requestedAt,
+                "mode=\(mode.rawValue) burst=\(isBurst) EV=\(bias) liveWanted=\(wantLive) rawWanted=\(wantRAW)")
+            CaptureDiagnostics.shared.event("sessionQueueEntered", id: id, at: sessionEnteredAt)
+            CaptureDiagnostics.shared.event("settingsReady", id: id,
+                "bracket=\(useBracket) live=\(live) raw=\(rawFormat != nil) depth=\(depthOn) quality=\(photoSettings.photoQualityPrioritization.rawValue) flash=\(photoSettings.flashMode.rawValue) max=\(photoSettings.maxPhotoDimensions.width)x\(photoSettings.maxPhotoDimensions.height)")
  
             // Ghi pending TRƯỚC khi bấm máy. Nếu bấm trước rồi mới ghi thì
             // delegate có thể về sớm hơn và bị bỏ qua vì chưa thấy entry nào.
             Task { @MainActor in
                 self.pendingCaptures[id] = pending
                 self.armWatchdog(id)
+                CaptureDiagnostics.shared.event("pendingRegistered", id: id)
  
                 self.sessionQueue.async {
+                    CaptureDiagnostics.shared.event("captureQueueEntered", id: id)
+                    var connectionChanged = false
                     // Chỉ ghi khi giá trị THỰC SỰ khác. Ghi đè lại y nguyên giá
                     // trị cũ vẫn khiến AVFoundation cấu hình lại connection và
                     // xả vòng đệm zero-shutter-lag, làm mất đúng cái ta vừa bật.
@@ -220,14 +298,22 @@ extension CameraManager {
                         if conn.videoRotationAngle != angle,
                            conn.isVideoRotationAngleSupported(angle) {
                             conn.videoRotationAngle = angle
+                            connectionChanged = true
                         }
                         if conn.isVideoMirroringSupported {
                             if conn.automaticallyAdjustsVideoMirroring {
                                 conn.automaticallyAdjustsVideoMirroring = false
+                                connectionChanged = true
                             }
-                            if conn.isVideoMirrored != mirror { conn.isVideoMirrored = mirror }
+                            if conn.isVideoMirrored != mirror {
+                                conn.isVideoMirrored = mirror
+                                connectionChanged = true
+                            }
                         }
                     }
+                    CaptureDiagnostics.shared.event("captureState", id: id,
+                        "connectionChanged=\(connectionChanged) angle=\(angle) ZSL_supported=\(self.photoOutput.isZeroShutterLagSupported) ZSL_enabled=\(self.photoOutput.isZeroShutterLagEnabled) responsive=\(self.photoOutput.isResponsiveCaptureEnabled) fast=\(self.photoOutput.isFastCapturePrioritizationEnabled) readiness=\(self.photoOutput.captureReadiness.rawValue) thermal=\(ProcessInfo.processInfo.thermalState.rawValue) lowPower=\(ProcessInfo.processInfo.isLowPowerModeEnabled) \(CaptureDiagnostics.deviceDetails(self.videoInput?.device))")
+                    CaptureDiagnostics.shared.event("captureCall", id: id)
                     self.photoOutput.capturePhoto(with: box.value, delegate: self)
                 }
             }
@@ -246,6 +332,7 @@ extension CameraManager {
         captureWatchdogs[id] = Task { [weak self] in
             try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled, let self, var pending = self.pendingCaptures[id] else { return }
+            CaptureDiagnostics.shared.event("watchdog", id: id, "seconds=\(seconds)")
  
             // Thôi chờ những mảnh không về nữa, cứu lấy phần đã có.
             pending.expectsLivePhoto = false
@@ -264,6 +351,7 @@ extension CameraManager {
     /// Đóng sổ đúng một lần cho mỗi lần gọi capturePhoto. `id` là nil khi lần
     /// chụp đó chưa kịp đăng ký pending.
     func endCapture(id: Int64?) {
+        CaptureDiagnostics.shared.event("captureBookkeepingEnd", id: id)
         if let id {
             pendingCaptures.removeValue(forKey: id)
             captureWatchdogs.removeValue(forKey: id)?.cancel()
@@ -280,6 +368,7 @@ extension CameraManager {
         for (_, pending) in pendingCaptures {
             if let url = pending.livePhotoURL { try? FileManager.default.removeItem(at: url) }
         }
+        CaptureDiagnostics.shared.event("abortAllCaptures", "count=\(pendingCaptures.count)")
         pendingCaptures.removeAll()
         capturesInFlight = 0
         isCapturing = false
@@ -302,7 +391,8 @@ extension CameraManager {
             return
         }
  
-        savePhoto(processed: processed,
+        CaptureDiagnostics.shared.event("resourcesReady", id: id)
+        savePhoto(id: id, processed: processed,
                   raw: pending.rawData,
                   liveMovie: pending.livePhotoURL,
                   depth: pending.kind == .portrait ? pending.depthData : nil)
@@ -318,7 +408,7 @@ extension CameraManager {
     /// chạy ngoài main actor. Bản cũ render CIMaskedVariableBlur trên một ảnh
     /// 12MP ngay trên main thread, giao diện đứng cả giây sau mỗi lần chụp
     /// chân dung.
-    private func savePhoto(processed: Data, raw: Data?, liveMovie: URL?, depth: AVDepthData?) {
+    private func savePhoto(id: Int64, processed: Data, raw: Data?, liveMovie: URL?, depth: AVDepthData?) {
         let location = currentLocation
         let targetAspect = settings.aspect
         let intensity = settings.portraitIntensity
@@ -328,6 +418,7 @@ extension CameraManager {
         let shouldCrop = targetAspect != .r4x3 && raw == nil && liveMovie == nil
  
         Task.detached(priority: .utility) {
+            CaptureDiagnostics.shared.event("saveWorkerStart", id: id)
             var finalData = processed
  
             // Chân dung: dựng ảnh xoá phông từ depth map.
@@ -357,8 +448,10 @@ extension CameraManager {
             // main actor thì không chắn giao diện.
             let thumb = UncheckedBox(MediaProcessing.thumbnail(from: finalData))
             await MainActor.run { self.lastThumbnail = thumb.value }
+            CaptureDiagnostics.shared.event("thumbnailPublished", id: id)
  
             let dataToSave = finalData
+            CaptureDiagnostics.shared.event("photosSubmit", id: id, "bytes=\(dataToSave.count)")
             PHPhotoLibrary.shared().performChanges {
                 let req = PHAssetCreationRequest.forAsset()
                 req.addResource(with: .photo, data: dataToSave, options: nil)
@@ -379,6 +472,8 @@ extension CameraManager {
  
                 req.location = location
             } completionHandler: { ok, err in
+                CaptureDiagnostics.shared.event("photosComplete", id: id,
+                    "ok=\(ok) errorCode=\((err as NSError?)?.code ?? 0)")
                 let text = err?.localizedDescription ?? ""
                 Task { @MainActor in
                     if !ok { self.errorMessage = "Lưu ảnh thất bại: \(text)" }
@@ -391,6 +486,16 @@ extension CameraManager {
 // MARK: - Delegate ảnh
  
 extension CameraManager: AVCapturePhotoCaptureDelegate {
+
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
+                                 willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        CaptureDiagnostics.shared.event("willCapture", id: resolvedSettings.uniqueID)
+    }
+
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
+                                 didCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
+        CaptureDiagnostics.shared.event("didCapture", id: resolvedSettings.uniqueID)
+    }
  
     /// Gọi ngay khi hệ thống chốt xong cấu hình thật của lần chụp. Nếu
     /// Live Photo hoặc RAW bị từ chối ở đây thì hạ kỳ vọng xuống luôn, đừng
@@ -398,6 +503,8 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
                                  willBeginCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings) {
         let id = resolvedSettings.uniqueID
+        CaptureDiagnostics.shared.event("willBegin", id: id,
+            "resolved=\(resolvedSettings.photoDimensions.width)x\(resolvedSettings.photoDimensions.height) flash=\(resolvedSettings.isFlashEnabled)")
         let willHaveLive = resolvedSettings.livePhotoMovieDimensions.width > 0
         let willHaveRAW = resolvedSettings.rawPhotoDimensions.width > 0
  
@@ -416,7 +523,18 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                                  error: Error?) {
         let id = photo.resolvedSettings.uniqueID
         let isRaw = photo.isRawPhoto
+        CaptureDiagnostics.shared.event("processingCallback", id: id,
+            "raw=\(isRaw) errorCode=\((error as NSError?)?.code ?? 0)")
+        if CaptureDiagnostics.shared.isEnabled {
+            let exif = photo.metadata[kCGImagePropertyExifDictionary as String] as? [String: Any]
+            // Whitelist only technical fields; never serialize the complete metadata/GPS.
+            CaptureDiagnostics.shared.event("photoMetadata", id: id,
+                "raw=\(isRaw) exposure_s=\(exif?[kCGImagePropertyExifExposureTime as String] ?? "missing") ISO=\(exif?[kCGImagePropertyExifISOSpeedRatings as String] ?? "missing") focalLength_mm=\(exif?[kCGImagePropertyExifFocalLength as String] ?? "missing") photoTimestamp_s=\(CMTimeGetSeconds(photo.timestamp))")
+        }
+        let dataStartedAt = ProcessInfo.processInfo.systemUptime
         let data = photo.fileDataRepresentation()
+        CaptureDiagnostics.shared.event("fileDataReady", id: id,
+            "raw=\(isRaw) bytes=\(data?.count ?? 0) encode_ms=\((ProcessInfo.processInfo.systemUptime - dataStartedAt) * 1000)")
         let failure = error?.localizedDescription
  
         // Depth map về theo hướng cảm biến, còn ảnh đã bị xoay bởi
@@ -456,6 +574,7 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                                  error: Error?) {
         let id = resolvedSettings.uniqueID
         let failed = error != nil
+        CaptureDiagnostics.shared.event("liveMovieReady", id: id, "failed=\(failed)")
         Task { @MainActor in
             guard var pending = self.pendingCaptures[id] else {
                 try? FileManager.default.removeItem(at: outputFileURL)
@@ -479,8 +598,10 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
                                  didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
                                  error: Error?) {
         let id = resolvedSettings.uniqueID
+        CaptureDiagnostics.shared.event("didFinishCapture", id: id,
+            "errorCode=\((error as NSError?)?.code ?? 0)")
         let failure = error?.localizedDescription
- 
+
         Task { @MainActor in
             guard let pending = self.pendingCaptures[id] else { return }
             if let failure {
@@ -599,4 +720,3 @@ enum PortraitRenderer {
         return pixel[0].isFinite ? pixel[0] : nil
     }
 }
- 

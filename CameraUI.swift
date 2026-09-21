@@ -1479,6 +1479,10 @@ struct ContentView: View {
 struct SettingsSheet: View {
     @ObservedObject var cam: CameraManager
     @Binding var isPresented: Bool
+    @State private var diagnosticsEnabled = CaptureDiagnostics.shared.isEnabled
+    @State private var diagnosticsURL: URL?
+    @State private var exportingDiagnostics = false
+    @State private var diagnosticsError: String?
 
     var body: some View {
         NavigationStack {
@@ -1580,6 +1584,39 @@ struct SettingsSheet: View {
                     }
                 }
  
+                Section("Chẩn đoán chụp ảnh") {
+                    Toggle("Ghi log chụp thử", isOn: $diagnosticsEnabled)
+                        .onChange(of: diagnosticsEnabled) { _, enabled in
+                            CaptureDiagnostics.shared.setEnabled(enabled)
+                            if enabled { diagnosticsURL = nil }
+                        }
+                    Button("Tạo file log") {
+                        exportingDiagnostics = true
+                        diagnosticsError = nil
+                        Task {
+                            do {
+                                diagnosticsURL = try await Task.detached(priority: .utility) {
+                                    try CaptureDiagnostics.shared.export()
+                                }.value
+                            } catch {
+                                diagnosticsError = "Không tạo được file log: \(error.localizedDescription)"
+                            }
+                            exportingDiagnostics = false
+                        }
+                    }
+                    .disabled(exportingDiagnostics)
+                    if let diagnosticsURL {
+                        ShareLink(item: diagnosticsURL) {
+                            Label("Chia sẻ log", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                    if let diagnosticsError {
+                        Text(diagnosticsError).foregroundStyle(.red)
+                    }
+                    Text("Bật trước khi chụp thử. Log chỉ ghi thông số và thời gian, không chứa ảnh hay GPS. Bật lại sẽ bắt đầu lượt mới; hãy xuất log trước khi đóng app. Chụp thêm thì tạo lại file log.")
+                        .font(.footnote)
+                }
+
                 Section("Hỗ trợ bố cục") {
                     Toggle("Lưới 3×3", isOn: Binding(
                         get: { cam.settings.gridOn },

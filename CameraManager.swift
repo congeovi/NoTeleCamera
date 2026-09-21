@@ -1542,6 +1542,8 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Nút chụp điều phối
  
     func shutterTapped() {
+        CaptureDiagnostics.shared.event("shutterTapped",
+            "sessionBusy=\(sessionBusy) mode=\(settings.mode.rawValue) timer=\(settings.timerOption.rawValue)")
         // isRecording đã tự loại trừ sessionBusy (setMode, reconfigure và
         // flipCamera đều chặn khi đang quay, nên không đường nào mở được
         // transaction giữa lúc quay), vậy nhánh dừng quay không bị guard này
