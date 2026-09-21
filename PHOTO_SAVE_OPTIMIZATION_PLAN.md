@@ -4,7 +4,21 @@ Ngày kiểm tra: 2026-09-21. Phạm vi: ảnh thường, Live Photo, ProRAW và
 
 ## 0. Plan đã thống nhất — tách phản hồi chụp thành 3 mốc
 
-Cập nhật 2026-09-21 theo trao đổi với người dùng. Đây là kế hoạch triển khai tiếp theo, chưa thay đổi Swift trong lượt này. Phần này thay thế đề xuất chung về hiệu ứng màn trập ở mục 1; các tối ưu capture/lưu khác vẫn là công việc riêng.
+Cập nhật 2026-09-21: đã triển khai phần code cho ba mốc trong `CameraManager.swift`, `CameraManagerCapture.swift`, `CameraUI.swift`. Phần này thay thế đề xuất chung về hiệu ứng màn trập ở mục 1; các tối ưu capture/lưu khác vẫn là công việc riêng.
+
+**Trạng thái kiểm chứng:** đã thêm 17 XCTest trong `Tests/CaptureFeedbackTests.swift` và target/scheme trong `project.yml`. Kiểm tra parser Swift không thấy lỗi ở capture/UI/test; hai parse gaps có sẵn của `CameraManager.swift` vẫn nằm ở cú pháp closure một dòng của audio helpers. YAML đọc được và `git diff --check` đạt. Windows không có Swift/Xcode/iOS SDK nên chưa chạy XCTest, type-check hoặc test thiết bị. Trên Mac: chạy `xcodegen generate`, chọn scheme `NoTeleCamera`, chạy Test trên iOS Simulator có sẵn; kiểm chứng timing Live/RAW/bracket và chuyển động trên iPhone thật theo mục E trước khi nghiệm thu.
+
+Đã thực hiện: phản hồi nhận thao tác, chỉ báo giữ máy, callback thu nhận ảnh tĩnh/Live, trạng thái lưu theo thứ tự request, chặn thumbnail cũ, chống callback trùng/đến sau abort, đếm burst theo ảnh thu nhận. Delegate cập nhật main bằng `DispatchQueue.main.async` nhất quán để giữ thứ tự enqueue của callback, thay các Task độc lập. Không thay capture quality hoặc mở khóa chụp ở mốc thu nhận. Record phản hồi tách khỏi pending file data và được dọn khi thu nhận, lỗi/hủy, callback cuối hoặc hoàn tất lưu.
+
+**Sửa sau review (2026-09-21):**
+
+- Bỏ `lastThumbnail = nil` ở đầu `capturePhoto`. Nó chạy trước cả guard `session.isRunning` và không đường hỏng nào trả ảnh cũ về, nên mọi cú chụp lỗi đều xoá trắng thumbnail hợp lệ của lần trước. Thứ tự đã do `publishPhotoThumbnail` giữ, phần nhìn đã do huy hiệu `.processing` giữ.
+- Thêm `abandonLiveWait(_:)` cho hai đường cứu ảnh — watchdog hết giờ và `didFinishProcessingLivePhotoToMovieFileAt` lỗi. Trước đó cả hai gọi `clearAcquisitionFeedback` nên *nuốt* phản hồi: ảnh tĩnh vẫn vào thư viện mà không có màn trập nào. Giờ là kết thúc chờ đúng nghĩa, có ảnh tĩnh thì màn trập vẫn nổ; không có mảnh nào mới dọn sổ trắng.
+- `photoSaveState` tự tắt: `.saved` sau 2s, `.failed` sau 4s, qua cửa duy nhất `setPhotoSaveState(_:)` (huỷ hẹn giờ cũ, kiểm `latestPhotoSequence`). Trước đó huy hiệu tick xanh nằm lại trên nút thư viện tới tận lần chụp sau.
+- Nút thư viện: `accessibilityLabel` trả về "Mở thư viện ảnh", trạng thái lưu chuyển sang `accessibilityValue`, huy hiệu con đặt `accessibilityHidden`. Trước đó VoiceOver đọc "Đã lưu ảnh, nút" — mất tên hành động.
+- Toast watchdog "Chụp chưa hoàn tất" không bắn ở burst nữa (một loạt 20 tấm hụt mảnh là 20 lần toast).
+
+**Còn treo, chưa sửa:** (a) 6 closure `DispatchQueue.main.async` trong `CameraManagerCapture.swift` mutate state MainActor từ closure `@Sendable` non-isolated — Swift 5 ra warning, Swift 6 là lỗi; nên bọc `MainActor.assumeIsolated`. (b) Overlay "Giữ máy" nhấp nháy ~150ms ở ảnh thường, nên chỉ hiện khi acquisition vượt ~350ms. (c) Chỗ đăng ký pending vẫn dùng `Task { @MainActor in }` — an toàn vì `photoOutput.capturePhoto` nằm trong chính task đó, nhưng là bất biến ngầm.
 
 ### Hành vi người dùng nhìn thấy
 

@@ -51,10 +51,19 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var lastThumbnail: UIImage?
     @Published var focusPoint: CGPoint?
     @Published var isCapturing = false
-    /// Tăng mỗi lần bấm máy thật sự (kể cả burst) để UI bắn hiệu ứng nháy
-    /// trắng như Camera gốc — không dùng isCapturing vì nó giữ true suốt
-    /// quá trình xử lý, còn nháy thì chỉ cần một cái chớp ngay lúc bấm.
+    /// Chỉ phát sau khi thu nhận xong, độc lập với xử lý và lưu ảnh.
     @Published var shutterFlashTrigger = 0
+    @Published var shutterAcceptedTrigger = 0
+    @Published var isAcquiringPhoto = false
+    @Published var photoSaveState: PhotoSaveState?
+    var photoRequestSequence = 0
+    var latestPhotoSequence = 0
+    var captureGeneration = 0
+    var acquiringPhotoTokens: Set<Int> = []
+    var captureFeedback: [Int64: CaptureFeedback] = [:]
+    /// Hẹn giờ tắt huy hiệu `.saved`/`.failed`. Chỉ `setPhotoSaveState` đụng
+    /// vào, và mỗi lần đổi trạng thái là huỷ cái cũ.
+    var photoSaveStateResetTask: Task<Void, Never>?
     @Published var isFront = false
     @Published var errorMessage: String?
     @Published var statusMessage: String?
@@ -84,6 +93,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var countdown = 0
     @Published var isBursting = false
     @Published var burstCount = 0
+    var burstGeneration = 0
  
     // Thước thăng bằng
     @Published var rollAngle: Double = 0
@@ -1557,6 +1567,8 @@ final class CameraManager: NSObject, ObservableObject {
         if settings.timerOption == .off {
             capturePhoto()
         } else {
+            guard !isCapturing else { return }
+            shutterAcceptedTrigger += 1
             runCountdown(from: settings.timerOption.rawValue)
         }
     }
@@ -1590,18 +1602,15 @@ final class CameraManager: NSObject, ObservableObject {
     func burstBegan() {
         guard settings.mode == .photo, !isRecording, !isBursting else { return }
         isBursting = true
+        burstGeneration += 1
         burstCount = 0
         burstTask = Task {
             while !Task.isCancelled && isBursting {
                 // Backpressure: bản cũ bắn đều 220ms bất kể output có tiêu hoá
                 // kịp không, nên khi máy nóng hoặc đang lưu ProRAW thì
                 // pendingCaptures phình dần và bộ nhớ đi theo.
-                // Chỉ đếm khi `capturePhoto` THẬT SỰ nhận. Đếm vô điều kiện
-                // thì lúc cổng chặn (đang tráo camera chẳng hạn) badge vẫn
-                // nhảy số trong khi không có tấm nào được chụp.
-                if capturesInFlight < 4, capturePhoto(isBurst: true) {
-                    burstCount += 1
-                }
+                // Badge được tăng ở callback thu nhận, không phải lúc gửi yêu cầu.
+                if capturesInFlight < 4 { capturePhoto(isBurst: true) }
                 try? await Task.sleep(for: .milliseconds(120))
             }
         }
@@ -1664,6 +1673,9 @@ final class CameraManager: NSObject, ObservableObject {
         // Ở chế độ quay, mic đã được gắn từ lúc vào chế độ. Chỉ QuickTake
         // (chế độ Ảnh) mới phải gắn tại chỗ.
         attachAudioIfNeeded()
+        photoRequestSequence += 1
+        latestPhotoSequence = photoRequestSequence
+        setPhotoSaveState(nil)
         isQuickTake = quickTake
         isRecording = true
         recordDuration = 0
@@ -1739,6 +1751,9 @@ final class CameraManager: NSObject, ObservableObject {
     /// Chụp ảnh tĩnh theo chu kỳ rồi ghép thành video 30fps.
     /// Cách này tốn ít bộ nhớ hơn quay video dài rồi tua nhanh.
     private func startTimeLapse() {
+        photoRequestSequence += 1
+        latestPhotoSequence = photoRequestSequence
+        setPhotoSaveState(nil)
         isRecording = true
         recordDuration = 0
         timeLapseFrames = 0

@@ -21,6 +21,7 @@ targets:
           - "Info.plist"
           - ".git/**"
           - ".github/**"
+          - "Tests/**"
     settings:
       base:
         PRODUCT_NAME: NoTeleCamera
@@ -31,4 +32,25 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  NoTeleCameraTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: NoTeleCamera
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.9"
+
+schemes:
+  NoTeleCamera:
+    build:
+      targets:
+        NoTeleCamera: all
+    test:
+      targets:
+        - NoTeleCameraTests
 

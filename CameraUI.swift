@@ -516,6 +516,7 @@ struct ContentView: View {
     @State private var modeSwipeConsumed = false
     @State private var isPinching = false
     @State private var shutterFlashOpacity: Double = 0
+    @State private var shutterPressFeedback = false
     @State private var previewUIView: PreviewUIView?
     @State private var modeFreezeFrame: UIImage?
     /// Bán kính mờ đang áp lên ảnh đóng băng khi chuyển chế độ: mờ dần vào
@@ -568,11 +569,19 @@ struct ContentView: View {
             if cam.isProcessing { processingOverlay }
             if let msg = cam.statusMessage { statusToast(msg) }
  
-            // Nháy trắng ngay lúc bấm máy, giống Camera gốc — bằng chứng trực
-            // quan rằng đã chụp, vì isCapturing đôi khi trả về quá nhanh để mắt
-            // kịp thấy nút thu nhỏ lại. Ở lớp ngoài cùng chứ không nằm trong
-            // previewArea: khung preview đã bị khoá theo tỉ lệ file nên nháy
-            // phải phủ cả màn hình như Camera gốc, không chỉ phủ khung ảnh.
+            if cam.isAcquiringPhoto || cam.isBursting {
+                VStack {
+                    Text(cam.isBursting ? "Đang chụp liên tiếp · Giữ máy" : "Đang chụp · Giữ máy")
+                        .font(.caption.weight(.semibold))
+                        .padding(8)
+                        .background(.black.opacity(0.65), in: Capsule())
+                        .padding(.top, 100)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+            }
+
+            // Thu nhận xong mới nháy; xử lý/lưu được hiển thị ở thumbnail.
             Color.white
                 .opacity(shutterFlashOpacity)
                 .allowsHitTesting(false)
@@ -881,6 +890,13 @@ struct ContentView: View {
             } else if cam.isLocked {
                 lockBadge
             }
+        }
+        .task(id: cam.shutterAcceptedTrigger) {
+            guard cam.shutterAcceptedTrigger > 0 else { return }
+            shutterPressFeedback = true
+            do { try await Task.sleep(for: .milliseconds(120)) }
+            catch { return }
+            shutterPressFeedback = false
         }
         .padding(.horizontal, 10)
         .padding(.top, 2)
@@ -1297,8 +1313,32 @@ struct ContentView: View {
             .frame(width: 46, height: 46)
             .clipShape(Circle())
             .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+            .overlay(alignment: .bottomTrailing) {
+                if let state = cam.photoSaveState {
+                    Group {
+                        switch state {
+                        case .processing, .saving:
+                            ProgressView().tint(.white).scaleEffect(0.65)
+                        case .saved:
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        case .failed:
+                            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+                        }
+                    }
+                    .frame(width: 20, height: 20)
+                    .background(.black.opacity(0.8), in: Circle())
+                    // Nhãn nằm ở Button bên ngoài (label + value), huy hiệu chỉ
+                    // là hình trang trí — để nó tự khai báo thì VoiceOver đọc
+                    // hai lần hoặc bị nhãn của Button nuốt mất.
+                    .accessibilityHidden(true)
+                }
+            }
             .contentShape(Circle())
         }
+        // Label là VIỆC nút làm, value là trạng thái. Nhét trạng thái vào label
+        // thì VoiceOver đọc "Đã lưu ảnh, nút" — mất luôn chuyện nó mở thư viện.
+        .accessibilityLabel("Mở thư viện ảnh")
+        .accessibilityValue(cam.photoSaveState?.label ?? "")
     }
 
     // Cả hai nút không cần tự ẩn / tự khoá khi đang quay hoặc đang xuất file:
@@ -1334,11 +1374,12 @@ struct ContentView: View {
                 Circle()
                     .fill(cam.settings.mode.isRecordingMode ? .red : .white)
                     .frame(width: 61, height: 61)
-                    .scaleEffect(cam.isCapturing || cam.isBursting ? 0.88 : 1.0)
+                    .scaleEffect(shutterPressFeedback || cam.isAcquiringPhoto || cam.isBursting ? 0.88 : 1.0)
             }
         }
         .animation(.easeOut(duration: 0.15), value: cam.isRecording)
-        .animation(.easeOut(duration: 0.1), value: cam.isCapturing)
+        .animation(.easeOut(duration: 0.1), value: cam.isAcquiringPhoto)
+        .animation(.easeOut(duration: 0.1), value: shutterPressFeedback)
         .offset(x: shutterDrag)
         .opacity(cam.isProcessing ? 0.4 : 1)
         .contentShape(Circle())
